@@ -332,6 +332,10 @@ class FiveGSixGIntegration:
             if not security_protocols:
                 raise ValueError("Security protocols list cannot be empty")
 
+            supported_layers = ['physical', 'data_link', 'network', 'transport', 'session', 'presentation', 'application']
+            if network_layer not in supported_layers:
+                raise ValueError(f"Unsupported network layer: {network_layer}. Supported: {supported_layers}")
+
             # Update central network status
             self.network_status['security_level'] = 'enhanced'
             self.network_status['security_protocols'] = security_protocols
