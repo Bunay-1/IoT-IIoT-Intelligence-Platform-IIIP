@@ -231,6 +231,7 @@ class AdaptiveControlLoops(LoggerMixin):
         # Control loops registry
         self.control_loops: Dict[str, PIDParameters] = {}
         self.performance_history: Dict[str, List[ControlPerformance]] = {}
+        self.process_state: Dict[str, float] = {} # Tracks the current process variable for each loop
 
         # Adaptive tuning settings
         self.adaptation_enabled = self.config.get("adaptation_enabled", True)
@@ -294,8 +295,58 @@ class AdaptiveControlLoops(LoggerMixin):
 
         self.control_loops[loop_id] = initial_params
         self.performance_history[loop_id] = []
+        self.process_state[loop_id] = initial_params.setpoint # Start at setpoint
 
         self.logger.info(f"Created control loop {loop_id} with mode {mode.value}")
+
+    def simulate_step(self, loop_id: str, external_disturbance: float = 0.0) -> ControlPerformance:
+        """
+        Simulate a single time step of the PID control loop.
+        """
+        if loop_id not in self.control_loops:
+            raise ValueError(f"Control loop {loop_id} not found")
+
+        params = self.control_loops[loop_id]
+        process_variable = self.process_state[loop_id]
+
+        # Calculate errors
+        error = params.setpoint - process_variable
+
+        # Integral term with anti-windup
+        integral_error = getattr(self, f"_integral_{loop_id}", 0) + error
+        integral_error = max(params.integral_limits[0], min(params.integral_limits[1], integral_error))
+
+        # Derivative term
+        derivative_error = error - getattr(self, f"_prev_error_{loop_id}", 0)
+
+        # PID control output calculation
+        output = (params.kp * error) + (params.ki * integral_error) + (params.kd * derivative_error)
+        output = max(params.output_limits[0], min(params.output_limits[1], output))
+
+        # --- Simulate Process Reaction ---
+        # A simple first-order system simulation: new_pv = old_pv * decay + output * gain + disturbance
+        process_gain = 0.85
+        time_constant = 0.95
+        new_process_variable = (process_variable * time_constant) + (output * process_gain) + external_disturbance
+        self.process_state[loop_id] = new_process_variable
+
+        # Store for next iteration
+        setattr(self, f"_integral_{loop_id}", integral_error)
+        setattr(self, f"_prev_error_{loop_id}", error)
+
+        # Create and store performance record
+        performance = ControlPerformance(
+            timestamp=datetime.now(),
+            setpoint=params.setpoint,
+            process_variable=new_process_variable,
+            control_output=output,
+            error=error,
+            integral_error=integral_error,
+            derivative_error=derivative_error,
+        )
+        self.performance_history[loop_id].append(performance)
+
+        return performance
 
     @monitor_operation("adaptive_control_loops.optimize_controller")
     def optimize_controller(
@@ -414,85 +465,6 @@ class AdaptiveControlLoops(LoggerMixin):
         except Exception as e:
             self.logger.error(f"Error analyzing controller {loop_id}: {e}")
             raise AdaptiveControlError(f"Failed to analyze controller: {e}") from e
-
-    def update_process_feedback(
-        self,
-        loop_id: str,
-        setpoint: float,
-        process_variable: float,
-        control_output: float,
-        timestamp: Optional[datetime] = None,
-    ) -> ControlPerformance:
-        """
-        Update control loop with process feedback for adaptive tuning.
-
-        Args:
-            loop_id: ID of the control loop
-            setpoint: Desired setpoint
-            process_variable: Current process variable
-            control_output: Controller output
-            timestamp: Optional timestamp
-
-        Returns:
-            ControlPerformance object
-
-        Raises:
-            ValueError: If loop_id not found
-        """
-        if loop_id not in self.control_loops:
-            raise ValueError(f"Control loop {loop_id} not found")
-
-        try:
-            update_time = timestamp or datetime.now()
-            params = self.control_loops[loop_id]
-
-            # Calculate errors
-            error = setpoint - process_variable
-            integral_error = getattr(self, f"_integral_{loop_id}", 0) + error
-            derivative_error = error - getattr(self, f"_prev_error_{loop_id}", 0)
-
-            # Apply integral limits
-            integral_error = max(
-                params.integral_limits[0],
-                min(params.integral_limits[1], integral_error),
-            )
-
-            # Store for next iteration
-            setattr(self, f"_integral_{loop_id}", integral_error)
-            setattr(self, f"_prev_error_{loop_id}", error)
-
-            # Create performance record
-            performance = ControlPerformance(
-                timestamp=update_time,
-                setpoint=setpoint,
-                process_variable=process_variable,
-                control_output=control_output,
-                error=error,
-                integral_error=integral_error,
-                derivative_error=derivative_error,
-            )
-
-            # Store in history
-            if loop_id not in self.performance_history:
-                self.performance_history[loop_id] = []
-            self.performance_history[loop_id].append(performance)
-
-            # Limit history size
-            max_history = self.config.get("max_history_size", 10000)
-            if len(self.performance_history[loop_id]) > max_history:
-                self.performance_history[loop_id] = self.performance_history[loop_id][
-                    -max_history:
-                ]
-
-            # Check for adaptation trigger
-            if self.adaptation_enabled:
-                self._check_adaptation_trigger(loop_id)
-
-            return performance
-
-        except Exception as e:
-            self.logger.error(f"Error updating process feedback for {loop_id}: {e}")
-            raise AdaptiveControlError(f"Failed to update process feedback: {e}") from e
 
     def _validate_pid_parameters(self, params: PIDParameters) -> None:
         """Validate PID parameters."""

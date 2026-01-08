@@ -172,9 +172,3 @@ class AccessibilityModule:
             self.logger.error(f"Async accessibility monitoring failed: {e}")
             raise AccessibilityError(f"Failed to monitor accessibility: {e}") from e
 
-
-# Backward compatibility functions
-def run_accessibility_audit(url: str, standards: List[str]) -> Dict[str, Any]:
-    """Legacy function for backward compatibility."""
-    module = AccessibilityModule()
-    return module.run_accessibility_audit(url, standards)
