@@ -285,17 +285,11 @@ class AdaptiveUserInterface:
             if not template:
                 return {"error": "Template not found"}
 
-            # Start with base layout
-            ui_config = template["base_layout"].copy()
+            # Generate the personalized layout first
+            ui_config = self.get_layout_for_user(user_id, context)
 
-            # Apply device adaptation
+            # Apply device-specific adaptations on top of the personalized layout
             ui_config = await self._apply_device_adaptation(ui_config, device_profile)
-
-            # Apply user preferences
-            ui_config = await self._apply_user_preferences(ui_config, user_profile)
-
-            # Apply context awareness
-            ui_config = await self._apply_context_awareness(ui_config, context, user_context or {})
 
             # Apply accessibility settings
             ui_config = await self._apply_accessibility(ui_config, user_profile)
@@ -362,74 +356,6 @@ class AdaptiveUserInterface:
         if performance_class == "low":
             adapted_config["animations"] = "disabled"
             adapted_config["complex_visuals"] = "simplified"
-
-        return adapted_config
-
-    async def _apply_user_preferences(self, ui_config: Dict, user_profile: Dict) -> Dict:
-        """Apply user preferences."""
-        preferences = user_profile.get("preferences", {})
-
-        adapted_config = ui_config.copy()
-
-        # Theme preference
-        if "theme" in preferences:
-            adapted_config["theme"] = preferences["theme"]
-
-        # Language preference
-        if "language" in preferences:
-            adapted_config["language"] = preferences["language"]
-
-        # Layout preferences
-        if "layout_style" in preferences:
-            adapted_config["layout_style"] = preferences["layout_style"]
-
-        # Dashboard customization
-        if "dashboard_widgets" in preferences:
-            adapted_config["widgets"] = preferences["dashboard_widgets"]
-
-        # Notification preferences
-        if "notification_settings" in preferences:
-            adapted_config["notifications"] = preferences["notification_settings"]
-
-        return adapted_config
-
-    async def _apply_context_awareness(self, ui_config: Dict, context: UIContext, user_context: Dict) -> Dict:
-        """Apply context-aware adaptations."""
-        adapted_config = ui_config.copy()
-
-        # Time-based adaptations
-        current_hour = datetime.now().hour
-        if 6 <= current_hour < 18:
-            adapted_config["color_scheme"] = "bright"
-        else:
-            adapted_config["color_scheme"] = "dark"
-
-        # Location-based adaptations
-        user_location = user_context.get("location")
-        if user_location:
-            # Adjust based on timezone or region
-            timezone = user_location.get("timezone", "UTC")
-            adapted_config["timezone"] = timezone
-
-        # Role-based adaptations
-        user_role = user_context.get("role", "viewer")
-        if user_role == "admin":
-            adapted_config["show_advanced_features"] = True
-            adapted_config["permissions"] = "full"
-        elif user_role == "operator":
-            adapted_config["show_realtime_data"] = True
-            adapted_config["alert_priority"] = "high"
-
-        # Context-specific adaptations
-        if context == UIContext.DASHBOARD:
-            adapted_config["refresh_interval"] = 30
-            adapted_config["show_kpis"] = True
-        elif context == UIContext.MONITORING:
-            adapted_config["auto_refresh"] = True
-            adapted_config["alert_badges"] = True
-        elif context == UIContext.ALERTS:
-            adapted_config["notification_banners"] = True
-            adapted_config["priority_filtering"] = True
 
         return adapted_config
 
@@ -543,6 +469,63 @@ class AdaptiveUserInterface:
             if "preferred_theme" not in preferences:
                 preferences["preferred_theme"] = theme
             # Could implement more sophisticated learning here
+
+    def _analyze_user_behavior(self, user_id: str) -> Dict:
+        """Analyze user interaction history to derive preferences."""
+        if user_id not in self.user_profiles:
+            return {}
+
+        interactions = self.interaction_history.get(user_id, [])
+        if not interactions:
+            return {}
+
+        # Analyze widget usage from layout configurations
+        widget_counts = defaultdict(int)
+        for interaction in interactions:
+            widgets = interaction.get("ui_config", {}).get("widgets", [])
+            for widget in widgets:
+                widget_counts[widget['name']] += 1
+
+        # Determine most frequent theme, layout, etc.
+        theme_counts = defaultdict(int)
+        for interaction in interactions:
+            theme = interaction.get("ui_config", {}).get("theme")
+            if theme:
+                theme_counts[theme] += 1
+
+        most_used_theme = max(theme_counts, key=theme_counts.get) if theme_counts else self.config['default_theme']
+
+        return {
+            "frequently_used_widgets": sorted(widget_counts.keys(), key=lambda w: widget_counts[w], reverse=True),
+            "preferred_theme": most_used_theme,
+        }
+
+    def get_layout_for_user(self, user_id: str, context: UIContext) -> Dict:
+        """
+        Generate a fully personalized UI layout configuration for a user based on their behavior.
+        """
+        behavior_insights = self._analyze_user_behavior(user_id)
+
+        # Start with a base layout for the context
+        base_layout = {"widgets": [], "layout_style": "grid"} # Default
+
+        # Personalize widget order based on frequency of use
+        if behavior_insights.get("frequently_used_widgets"):
+            sorted_widgets = [{"name": w} for w in behavior_insights["frequently_used_widgets"]]
+            # In a real app, you'd merge this with a list of all available widgets for the context
+            base_layout["widgets"] = sorted_widgets
+
+        # Construct the full UI configuration
+        ui_config = {
+            "theme": behavior_insights.get("preferred_theme", self.config['default_theme']),
+            "layout": base_layout,
+            "context": context.value,
+            "user_id": user_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        self.logger.info(f"Generated personalized layout for user {user_id} in context {context.name}")
+        return ui_config
 
     def update_user_preferences(self, user_id: str, preferences: Dict) -> bool:
         """Update user preferences."""
