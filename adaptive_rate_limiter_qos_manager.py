@@ -41,15 +41,22 @@ class RateLimitResult:
     reason: Optional[str] = None
 
 
+class QoSProfile(Enum):
+    """Defines different Quality of Service profiles."""
+    CRITICAL = "critical"
+    HIGH = "high"
+    DEFAULT = "default"
+    LOW = "low"
+    BACKGROUND = "background"
+
+
 class RateLimitError(Exception):
     """Base exception for rate limiting errors."""
-
     pass
 
 
 class QoSError(Exception):
     """Base exception for QoS management errors."""
-
     pass
 
 
@@ -63,35 +70,32 @@ class AdaptiveRateLimiterQoSManager:
     """
 
     def __init__(
-        self, rate_limits: Dict[str, int], config: Optional[Dict[str, Any]] = None
+        self, qos_profiles: Dict[QoSProfile, Dict[str, Any]], config: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Initialize the Adaptive Rate Limiter QoS Manager.
-
-        Args:
-            rate_limits: Dictionary mapping user IDs to their rate limits
-            config: Configuration dictionary
+        Initialize the Adaptive Rate Limiter QoS Manager with QoS profiles.
         """
         self.config = config or self._get_default_config()
         self.logger = get_logger(__name__)
 
-        # Rate limiting data structures
-        self.rate_limits = rate_limits.copy()
+        # QoS-based rate limiting
+        self.qos_profiles = qos_profiles
+        self.user_qos: Dict[str, QoSProfile] = {}
+        self.dynamic_limits: Dict[str, int] = {}
+
+        # State for rate limiting
         self.current_usage: Dict[str, int] = defaultdict(int)
         self.reset_times: Dict[str, float] = {}
-        self.request_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self.request_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self.config["history_maxlen"]))
 
-        # QoS management
+        # QoS management (simplified, as logic is now profile-based)
         self.priority_queues: Dict[int, asyncio.Queue] = {
-            1: asyncio.Queue(maxlen=self.config["queue_size"]),
-            2: asyncio.Queue(maxlen=self.config["queue_size"]),
-            3: asyncio.Queue(maxlen=self.config["queue_size"]),
+            p: asyncio.Queue(maxlen=self.config["queue_size"]) for p in range(1, 4)
         }
 
         # Adaptive parameters
         self.adaptation_enabled = self.config.get("adaptation_enabled", True)
-        self.burst_multiplier = self.config.get("burst_multiplier", 1.5)
-        self.cooldown_period = self.config.get("cooldown_period", 300)  # 5 minutes
+        self.cooldown_period = self.config.get("cooldown_period", 300)
 
         # Monitoring
         self.monitoring_enabled = self.config.get("monitoring_enabled", True)
@@ -102,14 +106,12 @@ class AdaptiveRateLimiterQoSManager:
     def _get_default_config(self) -> Dict[str, Any]:
         """Get default configuration."""
         return {
-            "window_seconds": 60,  # 1 minute window
-            "burst_multiplier": 1.5,
+            "window_seconds": 60,
             "cooldown_period": 300,
             "adaptation_enabled": True,
             "monitoring_enabled": True,
             "queue_size": 1000,
-            "max_wait_time": 30,  # seconds
-            "priority_weights": {1: 1.0, 2: 1.5, 3: 2.0},
+            "history_maxlen": 5000,
         }
 
     def _initialize_stats(self) -> Dict[str, Any]:
@@ -118,170 +120,113 @@ class AdaptiveRateLimiterQoSManager:
             "total_requests": 0,
             "allowed_requests": 0,
             "blocked_requests": 0,
-            "queue_lengths": {1: 0, 2: 0, 3: 0},
-            "avg_response_time": 0.0,
+            "requests_by_profile": defaultdict(int),
+            "active_adaptations": 0,
             "rate_limit_hits": defaultdict(int),
-            "adaptation_actions": 0,
         }
+
+    def set_user_qos_profile(self, user_id: str, profile: QoSProfile):
+        """Assign a QoS profile to a user."""
+        self.user_qos[user_id] = profile
+        # Initialize dynamic limit with the profile's base limit
+        self.dynamic_limits[user_id] = self.qos_profiles[profile]['limit_per_minute']
+        self.logger.info(f"Set QoS profile for user {user_id} to {profile.name}")
 
     async def enforce_rate_limits(self, request: Request) -> RateLimitResult:
         """
-        Enforce adaptive rate limits for a request.
-
-        Args:
-            request: Request object to check
-
-        Returns:
-            RateLimitResult indicating if request is allowed
+        Enforce adaptive, QoS-profile-based rate limits for a request.
         """
-        try:
-            self.stats["total_requests"] += 1
+        self.stats["total_requests"] += 1
+        user_id = request.user_id
 
-            # Check if user has rate limit configured
-            if request.user_id not in self.rate_limits:
-                return RateLimitResult(
-                    allowed=True,
-                    remaining_requests=-1,  # Unlimited
-                    reset_time=0,
-                    reason="No rate limit configured",
-                )
+        # Get user's QoS profile, default if not set
+        profile = self.user_qos.get(user_id, QoSProfile.DEFAULT)
+        self.stats["requests_by_profile"][profile.name] += 1
 
-            # Clean up expired entries
-            await self._cleanup_expired_entries()
+        # Get the current dynamic limit for the user
+        current_limit = self.dynamic_limits.get(user_id)
+        if current_limit is None:
+            # User not seen before, initialize from profile
+            self.set_user_qos_profile(user_id, profile)
+            current_limit = self.dynamic_limits[user_id]
 
-            # Check current usage
-            current_time = time.time()
-            window_start = current_time - self.config["window_seconds"]
+        # Check and reset window
+        current_time = time.time()
+        if current_time > self.reset_times.get(user_id, 0):
+            self.current_usage[user_id] = 0
+            self.reset_times[user_id] = current_time + self.config["window_seconds"]
+            # Trigger adaptation at the start of a new window
+            await self._adapt_rate_limit(user_id, profile)
+            current_limit = self.dynamic_limits[user_id] # Fetch updated limit
 
-            # Reset counter if window expired
-            if (
-                request.user_id not in self.reset_times
-                or current_time > self.reset_times[request.user_id]
-            ):
-                self.current_usage[request.user_id] = 0
-                self.reset_times[request.user_id] = (
-                    current_time + self.config["window_seconds"]
-                )
-
-            # Check rate limit
-            base_limit = self.rate_limits[request.user_id]
-            adapted_limit = await self._adapt_rate_limit(request.user_id, base_limit)
-
-            if self.current_usage[request.user_id] >= adapted_limit:
-                # Rate limit exceeded
-                reset_time = self.reset_times.get(
-                    request.user_id, current_time + self.config["window_seconds"]
-                )
-                retry_after = max(0, reset_time - current_time)
-
-                self.stats["blocked_requests"] += 1
-                self.stats["rate_limit_hits"][request.user_id] += 1
-
-                return RateLimitResult(
-                    allowed=False,
-                    remaining_requests=0,
-                    reset_time=reset_time,
-                    retry_after=retry_after,
-                    reason="Rate limit exceeded",
-                )
-
-            # Request allowed
-            self.current_usage[request.user_id] += 1
-            remaining = adapted_limit - self.current_usage[request.user_id]
-            reset_time = self.reset_times[request.user_id]
-
-            # Record request history
-            self.request_history[request.user_id].append(
-                {
-                    "timestamp": current_time,
-                    "endpoint": request.endpoint,
-                    "priority": request.priority,
-                }
-            )
-
-            self.stats["allowed_requests"] += 1
-
+        # Enforce limit
+        if self.current_usage[user_id] >= current_limit:
+            self.stats["blocked_requests"] += 1
+            self.stats["rate_limit_hits"][user_id] += 1
             return RateLimitResult(
-                allowed=True, remaining_requests=remaining, reset_time=reset_time
+                allowed=False,
+                remaining_requests=0,
+                reset_time=self.reset_times[user_id],
+                retry_after=self.reset_times[user_id] - current_time,
+                reason=f"Rate limit exceeded for {profile.name} profile.",
             )
 
-        except Exception as e:
-            self.logger.error(f"Error enforcing rate limits: {e}")
-            # Allow request on error to avoid blocking legitimate traffic
-            return RateLimitResult(
-                allowed=True,
-                remaining_requests=-1,
-                reset_time=0,
-                reason=f"Error: {str(e)}",
-            )
+        # Allow request
+        self.current_usage[user_id] += 1
+        self.stats["allowed_requests"] += 1
+        self.request_history[user_id].append(request)
 
-    async def _adapt_rate_limit(self, user_id: str, base_limit: int) -> int:
+        return RateLimitResult(
+            allowed=True,
+            remaining_requests=current_limit - self.current_usage[user_id],
+            reset_time=self.reset_times[user_id],
+        )
+
+    async def _adapt_rate_limit(self, user_id: str, profile: QoSProfile):
         """
-        Adapt rate limit based on user behavior and system conditions.
-
-        Args:
-            user_id: User identifier
-            base_limit: Base rate limit
-
-        Returns:
-            Adapted rate limit
+        Adapt rate limit based on long-term user behavior and QoS profile.
         """
         if not self.adaptation_enabled:
-            return base_limit
+            return
 
-        try:
-            # Analyze recent behavior
-            recent_requests = list(self.request_history[user_id])
-            if len(recent_requests) < 10:
-                return base_limit
+        profile_rules = self.qos_profiles[profile]
+        base_limit = profile_rules['limit_per_minute']
 
-            # Calculate request patterns
-            recent_window = time.time() - 300  # Last 5 minutes
-            recent_count = sum(
-                1 for r in recent_requests if r["timestamp"] > recent_window
-            )
+        history = self.request_history[user_id]
+        if len(history) < 100: # Need sufficient data
+            return
 
-            # Adaptive logic
-            adapted_limit = base_limit
+        # Analyze traffic over a longer period (e.g., 1 hour)
+        analysis_window = time.time() - 3600
+        relevant_requests = [r for r in history if r.timestamp > analysis_window]
 
-            # Increase limit for well-behaved users
-            if recent_count <= base_limit * 0.8:
-                adapted_limit = int(base_limit * self.burst_multiplier)
-                self.stats["adaptation_actions"] += 1
-                self.logger.debug(
-                    f"Increased rate limit for user {user_id} to {adapted_limit}"
-                )
+        if not relevant_requests:
+            return
 
-            # Decrease limit for abusive users
-            elif recent_count > base_limit * 1.5:
-                adapted_limit = max(1, int(base_limit * 0.5))
-                self.stats["adaptation_actions"] += 1
-                self.logger.debug(
-                    f"Decreased rate limit for user {user_id} to {adapted_limit}"
-                )
+        # Calculate average requests per minute over the last hour
+        avg_rpm = len(relevant_requests) / 60.0
 
-            return adapted_limit
+        current_limit = self.dynamic_limits.get(user_id, base_limit)
+        new_limit = current_limit
 
-        except Exception as e:
-            self.logger.warning(f"Error adapting rate limit for user {user_id}: {e}")
-            return base_limit
+        # Adaptive Logic based on QoS profile
+        if avg_rpm < (base_limit * 0.7):
+            # Consistently underusing, increase limit up to burst threshold
+            increase_factor = profile_rules.get('burst_multiplier', 1.2)
+            new_limit = min(int(current_limit * 1.1), int(base_limit * increase_factor))
+        elif avg_rpm > (base_limit * 1.2):
+            # Consistently overusing
+            if profile in [QoSProfile.LOW, QoSProfile.BACKGROUND]:
+                # Aggressively throttle low-priority users
+                new_limit = max(int(base_limit * 0.7), int(current_limit * 0.9))
+            else:
+                # Gently throttle higher-priority users
+                new_limit = max(base_limit, int(current_limit * 0.95))
 
-    async def _cleanup_expired_entries(self) -> None:
-        """Clean up expired rate limit entries."""
-        try:
-            current_time = time.time()
-            expired_users = [
-                user_id
-                for user_id, reset_time in self.reset_times.items()
-                if current_time > reset_time
-            ]
-
-            for user_id in expired_users:
-                del self.reset_times[user_id]
-                self.current_usage[user_id] = 0
-
-        except Exception as e:
-            self.logger.warning(f"Error cleaning up expired entries: {e}")
+        if new_limit != current_limit:
+            self.dynamic_limits[user_id] = new_limit
+            self.stats["active_adaptations"] += 1
+            self.logger.info(f"Adapted rate limit for user {user_id} ({profile.name}) from {current_limit} to {new_limit} based on avg RPM of {avg_rpm:.2f}")
 
     async def manage_qos(self) -> Dict[str, Any]:
         """
@@ -305,7 +250,6 @@ class AdaptiveRateLimiterQoSManager:
                 queue = self.priority_queues[priority]
                 queue_size = queue.qsize()
                 results["queue_status"][f"priority_{priority}"] = queue_size
-                self.stats["queue_lengths"][priority] = queue_size
 
                 # Process high priority requests first
                 if priority == 3 and queue_size > 0:
@@ -320,19 +264,6 @@ class AdaptiveRateLimiterQoSManager:
                     percentage = (size / total_queued) * 100
                     results["priority_distribution"][priority] = f"{percentage:.1f}%"
 
-            # Generate QoS recommendations
-            if results["queue_status"]["priority_3"] > 10:
-                results["recommendations"].append(
-                    "Critical: High priority queue overloaded"
-                )
-            elif (
-                results["queue_status"]["priority_1"]
-                > results["queue_status"]["priority_3"] * 2
-            ):
-                results["recommendations"].append(
-                    "Consider increasing processing capacity for low priority requests"
-                )
-
             self.logger.info(
                 f"QoS management completed. Queued requests: {total_queued}"
             )
@@ -345,29 +276,14 @@ class AdaptiveRateLimiterQoSManager:
     async def submit_request(self, request: Request) -> bool:
         """
         Submit a request to the appropriate priority queue.
-
-        Args:
-            request: Request to submit
-
-        Returns:
-            True if request was queued, False if queue is full
         """
         try:
             queue = self.priority_queues[request.priority]
-
-            # Check if queue has space
             if queue.full():
                 self.logger.warning(f"Queue full for priority {request.priority}")
                 return False
-
-            # Add request to queue
             await queue.put(request)
-            self.logger.debug(
-                f"Request queued for user {request.user_id} with priority {request.priority}"
-            )
-
             return True
-
         except Exception as e:
             self.logger.error(f"Error submitting request: {e}")
             return False
@@ -375,79 +291,34 @@ class AdaptiveRateLimiterQoSManager:
     async def process_queued_requests(self) -> List[Request]:
         """
         Process requests from queues in priority order.
-
-        Returns:
-            List of processed requests
         """
-        try:
-            processed_requests = []
+        processed_requests = []
+        for priority in sorted(self.priority_queues.keys(), reverse=True):
+            queue = self.priority_queues[priority]
+            batch_size = min(queue.qsize(), self.config.get("batch_size", 10))
+            for _ in range(batch_size):
+                if queue.empty():
+                    break
+                processed_requests.append(queue.get_nowait())
+                queue.task_done()
 
-            # Process in priority order (high to low)
-            for priority in [3, 2, 1]:
-                queue = self.priority_queues[priority]
-
-                # Process up to batch size requests from this priority
-                batch_size = min(queue.qsize(), self.config.get("batch_size", 10))
-
-                for _ in range(batch_size):
-                    try:
-                        request = queue.get_nowait()
-                        processed_requests.append(request)
-                        queue.task_done()
-                    except asyncio.QueueEmpty:
-                        break
-
+        if processed_requests:
             self.logger.info(f"Processed {len(processed_requests)} queued requests")
-            return processed_requests
-
-        except Exception as e:
-            self.logger.error(f"Error processing queued requests: {e}")
-            return []
+        return processed_requests
 
     def get_stats(self) -> Dict[str, Any]:
         """
-        Get current statistics.
-
-        Returns:
-            Dictionary with current statistics
+        Get current monitoring statistics.
         """
         stats = self.stats.copy()
+        stats["current_queue_lengths"] = {p: q.qsize() for p, q in self.priority_queues.items()}
+        stats["dynamic_user_limits"] = self.dynamic_limits
 
-        # Add real-time queue lengths
-        stats["current_queue_lengths"] = {
-            priority: queue.qsize() for priority, queue in self.priority_queues.items()
-        }
-
-        # Calculate rates
-        total_requests = stats["total_requests"]
-        if total_requests > 0:
-            stats["allowance_rate"] = stats["allowed_requests"] / total_requests
-            stats["block_rate"] = stats["blocked_requests"] / total_requests
+        total = stats["total_requests"]
+        if total > 0:
+            stats["block_rate_percent"] = (stats["blocked_requests"] / total) * 100
 
         return stats
-
-    def reset_user_limits(self, user_id: str) -> None:
-        """
-        Reset rate limits for a specific user.
-
-        Args:
-            user_id: User ID to reset
-        """
-        if user_id in self.current_usage:
-            self.current_usage[user_id] = 0
-            self.reset_times[user_id] = time.time() + self.config["window_seconds"]
-            self.logger.info(f"Reset rate limits for user {user_id}")
-
-    def update_rate_limit(self, user_id: str, new_limit: int) -> None:
-        """
-        Update rate limit for a user.
-
-        Args:
-            user_id: User ID
-            new_limit: New rate limit
-        """
-        self.rate_limits[user_id] = new_limit
-        self.logger.info(f"Updated rate limit for user {user_id} to {new_limit}")
 
     async def is_request_allowed(self, request: Request) -> bool:
         """
