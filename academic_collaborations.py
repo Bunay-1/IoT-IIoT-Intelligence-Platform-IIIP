@@ -42,203 +42,159 @@ class AcademicCollaborations:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
-        Initialize the academic collaborations module.
-
-        Args:
-            config: Optional configuration dictionary
+        Initialize the academic collaborations module with state management.
         """
         self.config = config or {}
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        self._validate_config()
+
+        # State management
+        self.partners: Dict[str, Dict[str, Any]] = {}
+        self.projects: Dict[str, Dict[str, Any]] = {}
+        self.publications: Dict[str, Dict[str, Any]] = {}
+        self.events: Dict[str, Dict[str, Any]] = {}
 
         # Collaboration settings
         self.max_partners = self.config.get('max_partners', 50)
         self.max_projects = self.config.get('max_projects', 100)
+        self._validate_config()
+        self.logger.info("Academic Collaborations module initialized with state management.")
 
     def _validate_config(self) -> None:
         """Validate configuration parameters."""
         if 'max_partners' in self.config and self.config['max_partners'] <= 0:
             raise ValidationError("max_partners must be a positive integer")
 
-    def research_partnership_brokerage(self, researchers: List[Dict[str, Any]], institutions: List[str]) -> Dict[str, Any]:
+    def research_partnership_brokerage(self, institution_id: str, details: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Broker academic research partnerships.
-
-        Args:
-            researchers: List of researcher profiles
-            institutions: List of collaborating institutions
-
-        Returns:
-            Dictionary containing brokerage results
-
-        Raises:
-            ProcessingError: If brokerage fails
-            ValidationError: If input validation fails
+        Establish a new academic research partnership and add it to the state.
         """
         try:
-            self.logger.info(f"Starting partnership brokerage with {len(institutions)} institutions")
+            if institution_id in self.partners:
+                raise ValidationError(f"Partnership with {institution_id} already exists.")
+            if len(self.partners) >= self.max_partners:
+                raise ProcessingError("Maximum number of partners reached.")
 
-            # Input validation
-            if not researchers:
-                raise ValidationError("Researchers list cannot be empty")
-            if not institutions:
-                raise ValidationError("Institutions list cannot be empty")
-            if len(institutions) > self.max_partners:
-                raise ValidationError(f"Too many institutions: {len(institutions)} > {self.max_partners}")
-
-            result = {
-                "brokerage_status": "successful",
-                "researchers_matched": len(researchers),
-                "institutions_connected": len(institutions),
-                "researchers": researchers,
-                "institutions": institutions,
-                "timestamp": datetime.utcnow().isoformat()
+            self.logger.info(f"Establishing new partnership with {institution_id}")
+            self.partners[institution_id] = {
+                "id": institution_id,
+                "details": details,
+                "status": "active",
+                "join_date": datetime.utcnow().isoformat()
             }
-
-            self.logger.info(f"Partnership brokerage completed for {len(researchers)} researchers and {len(institutions)} institutions")
-            return result
+            return {"status": "success", "partner": self.partners[institution_id]}
 
         except Exception as e:
-            self.logger.error(f"Partnership brokerage failed: {e}")
-            raise ProcessingError(f"Failed to broker partnerships: {e}") from e
+            self.logger.error(f"Failed to establish partnership: {e}")
+            raise ProcessingError(str(e))
 
-    def joint_research_projects(self, projects: List[Dict[str, Any]], collaborators: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def joint_research_projects(self, project_id: str, project_details: Dict[str, Any], partner_ids: List[str]) -> Dict[str, Any]:
         """
-        Manage joint research projects.
-
-        Args:
-            projects: List of research project details
-            collaborators: List of collaborator information
-
-        Returns:
-            Dictionary containing project management results
-
-        Raises:
-            ProcessingError: If project management fails
+        Create and manage a joint research project with existing partners.
         """
         try:
-            self.logger.info(f"Managing {len(projects)} joint research projects")
+            if project_id in self.projects:
+                raise ValidationError(f"Project {project_id} already exists.")
+            for pid in partner_ids:
+                if pid not in self.partners:
+                    raise ValidationError(f"Partner {pid} not found.")
 
-            # Validate project count
-            if len(projects) > self.max_projects:
-                raise ValidationError(f"Too many projects: {len(projects)} > {self.max_projects}")
-
-            result = {
-                "project_status": "ongoing",
-                "projects_active": len(projects),
-                "collaborators_involved": len(collaborators),
-                "projects": projects,
-                "collaborators": collaborators,
-                "timestamp": datetime.utcnow().isoformat()
+            self.logger.info(f"Creating new joint research project: {project_id}")
+            self.projects[project_id] = {
+                "id": project_id,
+                "details": project_details,
+                "partners": partner_ids,
+                "status": "ongoing",
+                "start_date": datetime.utcnow().isoformat(),
+                "budget": {"allocated": 0, "spent": 0}
             }
-
-            self.logger.info(f"Joint research project management completed for {len(projects)} projects")
-            return result
+            return {"status": "success", "project": self.projects[project_id]}
 
         except Exception as e:
-            self.logger.error(f"Joint research project management failed: {e}")
-            raise ProcessingError(f"Failed to manage joint projects: {e}") from e
+            self.logger.error(f"Failed to create project: {e}")
+            raise ProcessingError(str(e))
 
-    def knowledge_transfer_system(self, knowledge: Dict[str, Any], applications: List[str]) -> Dict[str, Any]:
+    def manage_project_budget(self, project_id: str, allocated_budget: float, expenditure: float = 0) -> Dict[str, Any]:
         """
-        Transfer academic knowledge to industry applications.
-
-        Args:
-            knowledge: Knowledge base to transfer
-            applications: List of industry applications
-
-        Returns:
-            Dictionary containing transfer results
-
-        Raises:
-            ProcessingError: If knowledge transfer fails
+        Manage the budget for a specific research project.
         """
-        try:
-            self.logger.info(f"Starting knowledge transfer for {len(applications)} applications")
+        if project_id not in self.projects:
+            raise ValidationError(f"Project {project_id} not found.")
 
-            # Validate inputs
-            if not knowledge:
-                raise ValidationError("Knowledge dictionary cannot be empty")
-            if not applications:
-                raise ValidationError("Applications list cannot be empty")
+        self.logger.info(f"Updating budget for project {project_id}")
+        self.projects[project_id]['budget']['allocated'] = allocated_budget
+        self.projects[project_id]['budget']['spent'] += expenditure
+        return {"status": "success", "budget": self.projects[project_id]['budget']}
 
-            result = {
-                "transfer_status": "completed",
-                "knowledge_transferred": knowledge,
-                "applications_targeted": len(applications),
-                "applications": applications,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-            self.logger.info(f"Knowledge transfer completed for {len(applications)} applications")
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Knowledge transfer failed: {e}")
-            raise ProcessingError(f"Failed to transfer knowledge: {e}") from e
-
-    def publication_tracking_engine(self, publications: List[Dict[str, Any]], metrics: Dict[str, Any]) -> Dict[str, Any]:
+    def publication_tracking_engine(self, pub_id: str, details: Dict[str, Any], project_id: str) -> Dict[str, Any]:
         """
-        Track academic publications and metrics.
-
-        Args:
-            publications: List of publication records
-            metrics: Tracking metrics configuration
-
-        Returns:
-            Dictionary containing tracking results
-
-        Raises:
-            ProcessingError: If tracking fails
+        Track a new academic publication and link it to a project.
         """
-        try:
-            self.logger.info(f"Starting publication tracking for {len(publications)} publications")
+        if project_id not in self.projects:
+            raise ValidationError(f"Project {project_id} not found.")
 
-            # Validate inputs
-            if not publications:
-                raise ValidationError("Publications list cannot be empty")
+        self.logger.info(f"Adding new publication {pub_id} for project {project_id}")
+        self.publications[pub_id] = {
+            "id": pub_id,
+            "details": details,
+            "project_id": project_id,
+            "publication_date": datetime.utcnow().isoformat()
+        }
+        return {"status": "success", "publication": self.publications[pub_id]}
 
-            result = {
-                "tracking_status": "active",
-                "publications_tracked": len(publications),
-                "metrics_applied": metrics,
-                "publications": publications,
-                "metrics": metrics,
-                "timestamp": datetime.utcnow().isoformat()
-            }
+    def organize_collaborative_event(self, event_id: str, details: Dict[str, Any], partner_ids: List[str]) -> Dict[str, Any]:
+        """
+        Organize a collaborative event like a workshop or conference.
+        """
+        for pid in partner_ids:
+            if pid not in self.partners:
+                raise ValidationError(f"Partner {pid} not found.")
 
-            self.logger.info(f"Publication tracking completed for {len(publications)} publications")
-            return result
+        self.logger.info(f"Organizing new event: {event_id}")
+        self.events[event_id] = {
+            "id": event_id,
+            "details": details,
+            "participating_partners": partner_ids,
+            "event_date": details.get("date"),
+            "status": "planned"
+        }
+        return {"status": "success", "event": self.events[event_id]}
 
-        except Exception as e:
-            self.logger.error(f"Publication tracking failed: {e}")
-            raise ProcessingError(f"Failed to track publications: {e}") from e
+    def generate_collaboration_report(self) -> Dict[str, Any]:
+        """
+        Generate a summary report of all collaboration activities.
+        """
+        return {
+            "report_date": datetime.utcnow().isoformat(),
+            "summary": {
+                "total_partners": len(self.partners),
+                "total_projects": len(self.projects),
+                "total_publications": len(self.publications),
+                "total_events": len(self.events)
+            },
+            "partners": list(self.partners.values()),
+            "projects": list(self.projects.values())
+        }
 
     async def async_collaboration_monitoring(self, monitoring_config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Asynchronously monitor collaboration activities.
-
-        Args:
-            monitoring_config: Monitoring configuration
-
-        Returns:
-            Dictionary containing monitoring results
+        Asynchronously monitor collaboration activities from the current state.
         """
         try:
-            self.logger.info("Starting async collaboration monitoring")
-
-            # Simulate async monitoring
+            self.logger.info("Starting async collaboration monitoring from state")
             await asyncio.sleep(0.1)
+
+            # Calculate metrics from the current state
+            active_projects = [p for p in self.projects.values() if p['status'] == 'ongoing']
+            recent_pubs = [pub for pub in self.publications.values() if (datetime.utcnow() - datetime.fromisoformat(pub['publication_date'])).days <= 30]
 
             result = {
                 "monitoring_status": "active",
-                "active_partnerships": 15,
-                "ongoing_projects": 8,
-                "publications_this_month": 12,
+                "active_partnerships": len(self.partners),
+                "ongoing_projects": len(active_projects),
+                "publications_this_month": len(recent_pubs),
                 "timestamp": datetime.utcnow().isoformat()
             }
-
-            self.logger.info("Async collaboration monitoring completed")
+            self.logger.info("Async collaboration monitoring completed.")
             return result
 
         except Exception as e:
