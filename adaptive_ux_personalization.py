@@ -49,6 +49,7 @@ class AdaptiveUXPersonalization(LoggerMixin):
         # User data and preferences
         self.user_profiles: Dict[str, Dict[str, Any]] = {}
         self.user_behavior_history: Dict[str, List[Dict[str, Any]]] = {}
+        self.user_journeys: Dict[str, List[Dict[str, Any]]] = {}
         self.personalization_cache: Dict[str, Dict[str, Any]] = {}
 
         # Personalization settings
@@ -111,6 +112,9 @@ class AdaptiveUXPersonalization(LoggerMixin):
                 personalization[
                     "ai_recommendations"
                 ] = self._generate_ai_recommendations(user_id, personalization)
+
+            # Add journey-based suggestions
+            personalization["recommendations"].extend(self.get_journey_optimization_suggestions(user_id))
 
             # Apply context-based adjustments
             if context:
@@ -431,6 +435,72 @@ class AdaptiveUXPersonalization(LoggerMixin):
         except Exception as e:
             self.logger.error(f"Failed to update profile for user {user_id}: {e}")
             raise
+
+    def track_journey_step(self, user_id: str, session_id: str, step_data: Dict[str, Any]):
+        """Track a single step in a user's journey."""
+        if user_id not in self.user_journeys:
+            self.user_journeys[user_id] = []
+
+        # Find the active journey/session
+        active_journey = None
+        for journey in self.user_journeys[user_id]:
+            if journey.get("session_id") == session_id and journey.get("status") == "active":
+                active_journey = journey
+                break
+
+        if not active_journey:
+            active_journey = {"session_id": session_id, "status": "active", "start_time": datetime.now(), "steps": []}
+            self.user_journeys[user_id].append(active_journey)
+
+        step_data['timestamp'] = datetime.now()
+        active_journey['steps'].append(step_data)
+
+        if step_data.get("action") == "logout" or step_data.get("is_final_step"):
+            active_journey["status"] = "completed"
+            active_journey["end_time"] = datetime.now()
+
+    def analyze_user_journeys(self, user_id: str) -> Dict[str, Any]:
+        """Analyze completed user journeys to find patterns and friction points."""
+        completed_journeys = [j for j in self.user_journeys.get(user_id, []) if j.get("status") == "completed"]
+        if not completed_journeys:
+            return {"message": "No completed journeys to analyze."}
+
+        path_counts = defaultdict(int)
+        total_time_spent = timedelta(0)
+        friction_points = []
+
+        for journey in completed_journeys:
+            path = " -> ".join([step.get("action", "unknown") for step in journey["steps"]])
+            path_counts[path] += 1
+            total_time_spent += (journey["end_time"] - journey["start_time"])
+
+            # Identify friction points (e.g., long time between steps)
+            for i in range(len(journey["steps"]) - 1):
+                time_diff = journey["steps"][i+1]["timestamp"] - journey["steps"][i]["timestamp"]
+                if time_diff.total_seconds() > 120: # Example threshold: 2 minutes
+                    friction_points.append(f"Long delay between '{journey['steps'][i]['action']}' and '{journey['steps'][i+1]['action']}'")
+
+        return {
+            "most_common_path": max(path_counts, key=path_counts.get) if path_counts else "N/A",
+            "total_journeys_analyzed": len(completed_journeys),
+            "average_journey_time_seconds": (total_time_spent / len(completed_journeys)).total_seconds(),
+            "identified_friction_points": friction_points,
+        }
+
+    def get_journey_optimization_suggestions(self, user_id: str) -> List[str]:
+        """Generate UX suggestions based on journey analysis."""
+        analysis = self.analyze_user_journeys(user_id)
+        suggestions = []
+
+        if "identified_friction_points" in analysis and analysis["identified_friction_points"]:
+            suggestions.append(f"Optimize user flow to reduce delays. Common friction points: {', '.join(analysis['identified_friction_points'][:2])}")
+
+        if "most_common_path" in analysis and "->" in analysis["most_common_path"]:
+            path_parts = analysis['most_common_path'].split(" -> ")
+            if len(path_parts) > 2:
+                suggestions.append(f"Consider creating a shortcut from '{path_parts[0]}' directly to '{path_parts[-1]}' as this is a common user path.")
+
+        return suggestions
 
     def _validate_profile_data(self, profile_data: Dict[str, Any]) -> Dict[str, Any]:
         """Validate and sanitize profile data."""
