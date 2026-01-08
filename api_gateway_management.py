@@ -1,0 +1,881 @@
+"""
+API Gateway Management Module
+
+This module implements API gateway functionality for the IoT IIoT platform,
+providing centralized API management, routing, authentication, rate limiting, and monitoring.
+"""
+
+import asyncio
+import hashlib
+import json
+import time
+import uuid
+from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple, Union, Callable
+from enum import Enum
+
+from utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+class RouteType(Enum):
+    """API route types."""
+    REST = "rest"
+    GRAPHQL = "graphql"
+    WEBSOCKET = "websocket"
+    GRPC = "grpc"
+
+
+class AuthenticationMethod(Enum):
+    """Authentication methods."""
+    JWT = "jwt"
+    API_KEY = "api_key"
+    OAUTH2 = "oauth2"
+    BASIC_AUTH = "basic_auth"
+    MUTUAL_TLS = "mutual_tls"
+
+
+class RateLimitType(Enum):
+    """Rate limiting types."""
+    REQUESTS_PER_MINUTE = "requests_per_minute"
+    REQUESTS_PER_HOUR = "requests_per_hour"
+    BANDWIDTH_PER_MINUTE = "bandwidth_per_minute"
+
+
+class GatewayStatus(Enum):
+    """Gateway status."""
+    RUNNING = "running"
+    STOPPED = "stopped"
+    ERROR = "error"
+    MAINTENANCE = "maintenance"
+
+
+class APIGatewayManagement:
+    """
+    API Gateway for centralized API management.
+
+    Features:
+    - Route management and load balancing
+    - Authentication and authorization
+    - Rate limiting and throttling
+    - Request/response transformation
+    - API versioning and documentation
+    - Monitoring and analytics
+    - Security policies
+    """
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.config = config or self._get_default_config()
+
+        # Gateway configuration
+        self.gateway_status = GatewayStatus.STOPPED
+
+        # API routes
+        self.routes: Dict[str, Dict] = {}
+
+        # Upstream services
+        self.upstream_services: Dict[str, List[Dict]] = defaultdict(list)
+
+        # Authentication configurations
+        self.auth_configs: Dict[str, Dict] = {}
+
+        # Rate limiting rules
+        self.rate_limits: Dict[str, Dict] = {}
+
+        # API keys and tokens
+        self.api_keys: Dict[str, Dict] = {}
+        self.jwt_tokens: Dict[str, Dict] = {}
+
+        # Request/response transformations
+        self.transformations: Dict[str, List[Dict]] = defaultdict(list)
+
+        # API documentation
+        self.api_docs: Dict[str, Dict] = {}
+
+        # Monitoring and metrics
+        self.request_metrics: Dict[str, Dict] = defaultdict(dict)
+        self.latency_tracking: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+
+        # Security policies
+        self.security_policies: Dict[str, Dict] = {}
+
+        # Load balancing
+        self.load_balancers: Dict[str, Dict] = {}
+
+        self.logger = get_logger(__name__)
+        self.logger.info("API Gateway Management initialized")
+
+    def _get_default_config(self) -> Dict:
+        """Get default configuration."""
+        return {
+            "host": "0.0.0.0",
+            "port": 8080,
+            "max_request_size": 10485760,  # 10MB
+            "request_timeout": 30,  # seconds
+            "max_concurrent_requests": 1000,
+            "enable_cors": True,
+            "enable_ssl": False,
+            "ssl_cert_path": None,
+            "ssl_key_path": None,
+            "log_requests": True,
+            "enable_metrics": True,
+            "metrics_retention_days": 30,
+        }
+
+    def add_route(
+        self,
+        route_path: str,
+        methods: List[str],
+        upstream_service: str,
+        route_config: Optional[Dict] = None
+    ) -> bool:
+        """
+        Add API route to gateway.
+
+        Args:
+            route_path: Route path (e.g., "/api/v1/users")
+            methods: HTTP methods (GET, POST, etc.)
+            upstream_service: Upstream service name
+            route_config: Route configuration
+
+        Returns:
+            Route addition success
+        """
+        try:
+            route_id = str(uuid.uuid4())
+
+            route = {
+                "id": route_id,
+                "path": route_path,
+                "methods": methods,
+                "upstream_service": upstream_service,
+                "config": route_config or {},
+                "created_at": datetime.now(),
+                "enabled": True,
+                "rate_limit": route_config.get("rate_limit") if route_config else None,
+                "auth_required": route_config.get("auth_required", False) if route_config else False,
+                "auth_method": route_config.get("auth_method") if route_config else None,
+                "transform_request": route_config.get("transform_request") if route_config else None,
+                "transform_response": route_config.get("transform_response") if route_config else None,
+                "caching_enabled": route_config.get("caching_enabled", False) if route_config else False,
+                "cache_ttl": route_config.get("cache_ttl", 300) if route_config else 300,
+            }
+
+            self.routes[route_id] = route
+
+            # Add to path-based index for faster lookup
+            if route_path not in self.routes:
+                self.routes[route_path] = route
+
+            self.logger.info(f"Added route: {methods} {route_path} -> {upstream_service}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Route addition failed: {e}")
+            return False
+
+    def add_upstream_service(
+        self,
+        service_name: str,
+        service_url: str,
+        service_config: Optional[Dict] = None
+    ) -> bool:
+        """
+        Add upstream service.
+
+        Args:
+            service_name: Service name
+            service_url: Service URL
+            service_config: Service configuration
+
+        Returns:
+            Service addition success
+        """
+        try:
+            service = {
+                "name": service_name,
+                "url": service_url.rstrip('/'),
+                "config": service_config or {},
+                "health_check_url": service_config.get("health_check_url") if service_config else None,
+                "timeout": service_config.get("timeout", self.config["request_timeout"]) if service_config else self.config["request_timeout"],
+                "retry_count": service_config.get("retry_count", 3) if service_config else 3,
+                "circuit_breaker": {
+                    "enabled": service_config.get("circuit_breaker_enabled", True) if service_config else True,
+                    "failure_threshold": service_config.get("failure_threshold", 5) if service_config else 5,
+                    "recovery_timeout": service_config.get("recovery_timeout", 60) if service_config else 60,
+                    "state": "closed",
+                    "failure_count": 0,
+                    "last_failure": None
+                },
+                "load_balancing": service_config.get("load_balancing", "round_robin") if service_config else "round_robin",
+                "weight": service_config.get("weight", 1) if service_config else 1,
+                "created_at": datetime.now(),
+                "status": "unknown"
+            }
+
+            self.upstream_services[service_name].append(service)
+
+            self.logger.info(f"Added upstream service: {service_name} -> {service_url}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Upstream service addition failed: {e}")
+            return False
+
+    def configure_authentication(
+        self,
+        auth_method: AuthenticationMethod,
+        auth_config: Dict
+    ) -> bool:
+        """
+        Configure authentication method.
+
+        Args:
+            auth_method: Authentication method
+            auth_config: Authentication configuration
+
+        Returns:
+            Configuration success
+        """
+        try:
+            self.auth_configs[auth_method.value] = {
+                "method": auth_method.value,
+                "config": auth_config,
+                "enabled": True,
+                "created_at": datetime.now()
+            }
+
+            self.logger.info(f"Configured authentication: {auth_method.value}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Authentication configuration failed: {e}")
+            return False
+
+    def add_api_key(
+        self,
+        key_name: str,
+        api_key: str,
+        permissions: List[str],
+        key_config: Optional[Dict] = None
+    ) -> bool:
+        """
+        Add API key for authentication.
+
+        Args:
+            key_name: Key name
+            api_key: API key value
+            permissions: Key permissions
+            key_config: Key configuration
+
+        Returns:
+            Key addition success
+        """
+        try:
+            key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+            api_key_config = {
+                "name": key_name,
+                "key_hash": key_hash,
+                "permissions": permissions,
+                "config": key_config or {},
+                "created_at": datetime.now(),
+                "enabled": True,
+                "last_used": None,
+                "usage_count": 0,
+                "rate_limit_override": key_config.get("rate_limit_override") if key_config else None
+            }
+
+            self.api_keys[key_hash] = api_key_config
+
+            self.logger.info(f"Added API key: {key_name}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"API key addition failed: {e}")
+            return False
+
+    def add_rate_limit(
+        self,
+        limit_name: str,
+        limit_type: RateLimitType,
+        limit_value: int,
+        limit_config: Optional[Dict] = None
+    ) -> bool:
+        """
+        Add rate limiting rule.
+
+        Args:
+            limit_name: Limit name
+            limit_type: Type of rate limit
+            limit_value: Limit value
+            limit_config: Limit configuration
+
+        Returns:
+            Limit addition success
+        """
+        try:
+            rate_limit = {
+                "name": limit_name,
+                "type": limit_type.value,
+                "value": limit_value,
+                "config": limit_config or {},
+                "created_at": datetime.now(),
+                "enabled": True,
+                "counters": defaultdict(lambda: deque(maxlen=1000))  # Request timestamps per client
+            }
+
+            self.rate_limits[limit_name] = rate_limit
+
+            self.logger.info(f"Added rate limit: {limit_name} ({limit_type.value}: {limit_value})")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Rate limit addition failed: {e}")
+            return False
+
+    async def start_gateway(self) -> bool:
+        """Start API gateway."""
+        try:
+            self.gateway_status = GatewayStatus.RUNNING
+
+            # Start background tasks
+            asyncio.create_task(self._health_check_services())
+            asyncio.create_task(self._cleanup_expired_tokens())
+            asyncio.create_task(self._update_metrics())
+
+            self.logger.info(f"API Gateway started on {self.config['host']}:{self.config['port']}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Gateway start failed: {e}")
+            self.gateway_status = GatewayStatus.ERROR
+            return False
+
+    async def stop_gateway(self) -> bool:
+        """Stop API gateway."""
+        self.gateway_status = GatewayStatus.STOPPED
+        self.logger.info("API Gateway stopped")
+        return True
+
+    async def process_request(
+        self,
+        method: str,
+        path: str,
+        headers: Dict,
+        body: Optional[bytes] = None,
+        query_params: Optional[Dict] = None,
+        client_ip: Optional[str] = None
+    ) -> Dict:
+        """
+        Process incoming API request.
+
+        Args:
+            method: HTTP method
+            path: Request path
+            headers: Request headers
+            body: Request body
+            query_params: Query parameters
+            client_ip: Client IP address
+
+        Returns:
+            Response dictionary
+        """
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
+
+        try:
+            # Find matching route
+            route = self._find_route(method, path)
+            if not route:
+                return self._create_response(404, {"error": "Route not found"})
+
+            # Check if route is enabled
+            if not route.get("enabled", True):
+                return self._create_response(403, {"error": "Route disabled"})
+
+            # Authentication
+            if route.get("auth_required"):
+                auth_result = await self._authenticate_request(headers, route)
+                if not auth_result["success"]:
+                    return self._create_response(401, {"error": auth_result["error"]})
+
+                client_id = auth_result.get("client_id")
+            else:
+                client_id = client_ip or "anonymous"
+
+            # Rate limiting
+            rate_limit_result = await self._check_rate_limit(client_id, route, headers)
+            if not rate_limit_result["allowed"]:
+                return self._create_response(429, {"error": "Rate limit exceeded"})
+
+            # Request transformation
+            transformed_request = await self._transform_request(route, body, headers, query_params)
+
+            # Route to upstream service
+            upstream_response = await self._route_to_upstream(route, transformed_request, headers)
+
+            # Response transformation
+            transformed_response = await self._transform_response(route, upstream_response)
+
+            # Record metrics
+            await self._record_request_metrics(request_id, route, upstream_response, time.time() - start_time)
+
+            return transformed_response
+
+        except Exception as e:
+            self.logger.error(f"Request processing failed: {e}")
+            return self._create_response(500, {"error": "Internal server error"})
+
+    def _find_route(self, method: str, path: str) -> Optional[Dict]:
+        """Find matching route for request."""
+        # Simple route matching - in real implementation would use more sophisticated routing
+        for route_id, route in self.routes.items():
+            if isinstance(route_id, str) and not route_id.startswith("route_"):
+                continue
+
+            if route["path"] == path and method.upper() in route["methods"]:
+                return route
+
+        return None
+
+    async def _authenticate_request(self, headers: Dict, route: Dict) -> Dict:
+        """Authenticate API request."""
+        auth_method = route.get("auth_method", "api_key")
+
+        if auth_method == "api_key":
+            api_key = headers.get("X-API-Key") or headers.get("Authorization", "").replace("Bearer ", "")
+            if not api_key:
+                return {"success": False, "error": "API key required"}
+
+            key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+            key_config = self.api_keys.get(key_hash)
+
+            if not key_config or not key_config.get("enabled"):
+                return {"success": False, "error": "Invalid API key"}
+
+            # Check permissions
+            required_permissions = route.get("config", {}).get("required_permissions", [])
+            if required_permissions:
+                key_permissions = key_config.get("permissions", [])
+                if not any(perm in key_permissions for perm in required_permissions):
+                    return {"success": False, "error": "Insufficient permissions"}
+
+            # Update key usage
+            key_config["last_used"] = datetime.now()
+            key_config["usage_count"] += 1
+
+            return {"success": True, "client_id": key_config["name"]}
+
+        elif auth_method == "jwt":
+            token = headers.get("Authorization", "").replace("Bearer ", "")
+            if not token:
+                return {"success": False, "error": "JWT token required"}
+
+            # Validate JWT token
+            token_data = self.jwt_tokens.get(token)
+            if not token_data:
+                return {"success": False, "error": "Invalid JWT token"}
+
+            if token_data.get("expires_at") and datetime.now() > token_data["expires_at"]:
+                return {"success": False, "error": "JWT token expired"}
+
+            return {"success": True, "client_id": token_data.get("client_id")}
+
+        return {"success": False, "error": "Unsupported authentication method"}
+
+    async def _check_rate_limit(self, client_id: str, route: Dict, headers: Dict) -> Dict:
+        """Check rate limiting for request."""
+        # Check route-specific rate limit
+        route_limit = route.get("rate_limit")
+        if route_limit:
+            limit_name = route_limit
+        else:
+            limit_name = "default"
+
+        rate_limit = self.rate_limits.get(limit_name)
+        if not rate_limit:
+            return {"allowed": True}
+
+        # Get client-specific counter
+        counters = rate_limit["counters"]
+        client_counter = counters[client_id]
+
+        # Clean old requests
+        now = datetime.now()
+        window_seconds = self._get_rate_limit_window(rate_limit["type"])
+        cutoff = now - timedelta(seconds=window_seconds)
+
+        # Remove old timestamps
+        while client_counter and client_counter[0] < cutoff:
+            client_counter.popleft()
+
+        # Check if under limit
+        if len(client_counter) >= rate_limit["value"]:
+            return {"allowed": False, "retry_after": window_seconds}
+
+        # Add current request
+        client_counter.append(now)
+
+        return {"allowed": True}
+
+    def _get_rate_limit_window(self, limit_type: str) -> int:
+        """Get rate limit window in seconds."""
+        if limit_type == "requests_per_minute":
+            return 60
+        elif limit_type == "requests_per_hour":
+            return 3600
+        else:
+            return 60
+
+    async def _transform_request(self, route: Dict, body: Optional[bytes], headers: Dict, query_params: Optional[Dict]) -> Dict:
+        """Transform request before forwarding."""
+        transform_config = route.get("transform_request")
+        if not transform_config:
+            return {"body": body, "headers": headers, "query_params": query_params}
+
+        # Apply transformations
+        transformed_body = body
+        transformed_headers = headers.copy()
+        transformed_params = query_params.copy() if query_params else {}
+
+        # Simple transformation logic - in real implementation would be more sophisticated
+        if transform_config.get("add_headers"):
+            transformed_headers.update(transform_config["add_headers"])
+
+        if transform_config.get("remove_headers"):
+            for header in transform_config["remove_headers"]:
+                transformed_headers.pop(header, None)
+
+        return {
+            "body": transformed_body,
+            "headers": transformed_headers,
+            "query_params": transformed_params
+        }
+
+    async def _route_to_upstream(self, route: Dict, request_data: Dict, headers: Dict) -> Dict:
+        """Route request to upstream service."""
+        upstream_service = route["upstream_service"]
+        services = self.upstream_services.get(upstream_service, [])
+
+        if not services:
+            return {"status_code": 503, "body": {"error": "No upstream services available"}}
+
+        # Select service using load balancing
+        service = self._select_upstream_service(services, upstream_service)
+
+        # Check circuit breaker
+        if not self._check_circuit_breaker(service):
+            return {"status_code": 503, "body": {"error": "Service temporarily unavailable"}}
+
+        try:
+            # Forward request to upstream service
+            upstream_response = await self._forward_request(service, route, request_data, headers)
+
+            # Update circuit breaker success
+            self._record_circuit_breaker_success(service)
+
+            return upstream_response
+
+        except Exception as e:
+            # Update circuit breaker failure
+            self._record_circuit_breaker_failure(service)
+            raise e
+
+    def _select_upstream_service(self, services: List[Dict], service_name: str) -> Dict:
+        """Select upstream service using load balancing."""
+        # Simple round-robin for now
+        lb_config = self.load_balancers.get(service_name, {"index": 0})
+
+        healthy_services = [s for s in services if s["status"] == "healthy"]
+
+        if not healthy_services:
+            # Fallback to any service
+            healthy_services = services
+
+        index = lb_config.get("index", 0) % len(healthy_services)
+        selected_service = healthy_services[index]
+
+        # Update index
+        lb_config["index"] = (index + 1) % len(healthy_services)
+        self.load_balancers[service_name] = lb_config
+
+        return selected_service
+
+    def _check_circuit_breaker(self, service: Dict) -> bool:
+        """Check circuit breaker state."""
+        cb = service["circuit_breaker"]
+
+        if cb["state"] == "closed":
+            return True
+        elif cb["state"] == "open":
+            if datetime.now() > cb["last_failure"] + timedelta(seconds=cb["recovery_timeout"]):
+                cb["state"] = "half_open"
+                return True
+            return False
+        elif cb["state"] == "half_open":
+            return True
+
+        return True
+
+    def _record_circuit_breaker_success(self, service: Dict):
+        """Record successful request."""
+        cb = service["circuit_breaker"]
+        if cb["state"] == "half_open":
+            cb["state"] = "closed"
+            cb["failure_count"] = 0
+
+    def _record_circuit_breaker_failure(self, service: Dict):
+        """Record failed request."""
+        cb = service["circuit_breaker"]
+        cb["failure_count"] += 1
+        cb["last_failure"] = datetime.now()
+
+        if cb["failure_count"] >= cb["failure_threshold"]:
+            cb["state"] = "open"
+
+    async def _forward_request(self, service: Dict, route: Dict, request_data: Dict, headers: Dict) -> Dict:
+        """Forward request to upstream service."""
+        # In real implementation, would make actual HTTP request to upstream service
+        # For demo, simulate response
+
+        await asyncio.sleep(0.01)  # Simulate network latency
+
+        # Simulate response based on route
+        if route["path"].endswith("/users"):
+            response_body = {"users": [{"id": 1, "name": "John Doe"}]}
+        elif route["path"].endswith("/data"):
+            response_body = {"data": [1, 2, 3, 4, 5]}
+        else:
+            response_body = {"message": f"Response from {service['name']}"}
+
+        return {
+            "status_code": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": response_body
+        }
+
+    async def _transform_response(self, route: Dict, response: Dict) -> Dict:
+        """Transform response before returning to client."""
+        transform_config = route.get("transform_response")
+        if not transform_config:
+            return response
+
+        # Apply response transformations
+        transformed_response = response.copy()
+
+        # Simple transformation logic
+        if transform_config.get("add_headers"):
+            transformed_response["headers"].update(transform_config["add_headers"])
+
+        if transform_config.get("remove_fields"):
+            body = transformed_response.get("body", {})
+            if isinstance(body, dict):
+                for field in transform_config["remove_fields"]:
+                    body.pop(field, None)
+
+        return transformed_response
+
+    async def _record_request_metrics(self, request_id: str, route: Dict, response: Dict, latency: float):
+        """Record request metrics."""
+        route_path = route["path"]
+
+        if route_path not in self.request_metrics:
+            self.request_metrics[route_path] = {
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "avg_latency": 0.0,
+                "last_request": None
+            }
+
+        metrics = self.request_metrics[route_path]
+        metrics["total_requests"] += 1
+        metrics["last_request"] = datetime.now()
+
+        if response.get("status_code", 500) < 400:
+            metrics["successful_requests"] += 1
+        else:
+            metrics["failed_requests"] += 1
+
+        # Update average latency
+        total_requests = metrics["total_requests"]
+        current_avg = metrics["avg_latency"]
+        metrics["avg_latency"] = (current_avg * (total_requests - 1) + latency) / total_requests
+
+        # Track latency
+        self.latency_tracking[route_path].append(latency)
+
+    def _create_response(self, status_code: int, body: Dict, headers: Optional[Dict] = None) -> Dict:
+        """Create standardized response."""
+        return {
+            "status_code": status_code,
+            "headers": headers or {"Content-Type": "application/json"},
+            "body": body
+        }
+
+    async def _health_check_services(self):
+        """Perform health checks on upstream services."""
+        while self.gateway_status == GatewayStatus.RUNNING:
+            try:
+                for service_name, services in self.upstream_services.items():
+                    for service in services:
+                        await self._health_check_service(service)
+
+                await asyncio.sleep(30)  # Check every 30 seconds
+
+            except Exception as e:
+                self.logger.error(f"Service health check error: {e}")
+                await asyncio.sleep(30)
+
+    async def _health_check_service(self, service: Dict):
+        """Health check individual service."""
+        health_url = service.get("health_check_url")
+        if not health_url:
+            # Assume healthy if no health check URL
+            service["status"] = "healthy"
+            return
+
+        try:
+            # In real implementation, would make actual health check request
+            await asyncio.sleep(0.001)  # Simulate quick check
+
+            # Simulate health status
+            import random
+            is_healthy = random.random() > 0.05  # 95% healthy
+
+            service["status"] = "healthy" if is_healthy else "unhealthy"
+
+        except Exception as e:
+            self.logger.error(f"Health check failed for {service['name']}: {e}")
+            service["status"] = "unhealthy"
+
+    async def _cleanup_expired_tokens(self):
+        """Clean up expired JWT tokens."""
+        while self.gateway_status == GatewayStatus.RUNNING:
+            try:
+                now = datetime.now()
+                expired_tokens = []
+
+                for token, token_data in self.jwt_tokens.items():
+                    if token_data.get("expires_at") and now > token_data["expires_at"]:
+                        expired_tokens.append(token)
+
+                for token in expired_tokens:
+                    del self.jwt_tokens[token]
+
+                await asyncio.sleep(300)  # Clean every 5 minutes
+
+            except Exception as e:
+                self.logger.error(f"Token cleanup error: {e}")
+                await asyncio.sleep(300)
+
+    async def _update_metrics(self):
+        """Update and aggregate metrics."""
+        while self.gateway_status == GatewayStatus.RUNNING:
+            try:
+                # Aggregate metrics
+                total_requests = sum(m.get("total_requests", 0) for m in self.request_metrics.values())
+                total_successful = sum(m.get("successful_requests", 0) for m in self.request_metrics.values())
+
+                if total_requests > 0:
+                    success_rate = total_successful / total_requests
+                    self.logger.info(f"Gateway metrics - Total requests: {total_requests}, Success rate: {success_rate:.2%}")
+
+                await asyncio.sleep(60)  # Update every minute
+
+            except Exception as e:
+                self.logger.error(f"Metrics update error: {e}")
+                await asyncio.sleep(60)
+
+    def get_gateway_status(self) -> Dict:
+        """Get gateway status."""
+        return {
+            "status": self.gateway_status.value,
+            "routes_count": len([r for r in self.routes.keys() if isinstance(r, str) and r.startswith("route_")]),
+            "services_count": len(self.upstream_services),
+            "uptime": str(datetime.now() - self.config.get("start_time", datetime.now())),
+            "config": self.config
+        }
+
+    def get_route_metrics(self, route_path: Optional[str] = None) -> Dict:
+        """Get route metrics."""
+        if route_path:
+            return self.request_metrics.get(route_path, {})
+
+        return dict(self.request_metrics)
+
+    def get_upstream_services_status(self) -> Dict[str, List[Dict]]:
+        """Get upstream services status."""
+        return {
+            service_name: [
+                {
+                    "name": service["name"],
+                    "url": service["url"],
+                    "status": service["status"],
+                    "circuit_breaker_state": service["circuit_breaker"]["state"]
+                }
+                for service in services
+            ]
+            for service_name, services in self.upstream_services.items()
+        }
+
+
+# Global API gateway instance
+api_gateway = APIGatewayManagement()
+
+
+def add_api_route(
+    route_path: str,
+    methods: List[str],
+    upstream_service: str,
+    route_config: Optional[Dict] = None
+) -> bool:
+    """Add API route."""
+    return api_gateway.add_route(route_path, methods, upstream_service, route_config)
+
+
+def add_upstream_service(
+    service_name: str,
+    service_url: str,
+    service_config: Optional[Dict] = None
+) -> bool:
+    """Add upstream service."""
+    return api_gateway.add_upstream_service(service_name, service_url, service_config)
+
+
+def configure_gateway_auth(
+    auth_method: str,
+    auth_config: Dict
+) -> bool:
+    """Configure gateway authentication."""
+    return api_gateway.configure_authentication(AuthenticationMethod(auth_method), auth_config)
+
+
+async def start_api_gateway() -> bool:
+    """Start API gateway."""
+    return await api_gateway.start_gateway()
+
+
+async def process_api_request(
+    method: str,
+    path: str,
+    headers: Dict,
+    body: Optional[bytes] = None,
+    query_params: Optional[Dict] = None,
+    client_ip: Optional[str] = None
+) -> Dict:
+    """Process API request."""
+    return await api_gateway.process_request(method, path, headers, body, query_params, client_ip)
+
+
+def get_gateway_status() -> Dict:
+    """Get gateway status."""
+    return api_gateway.get_gateway_status()
+
+
+def get_route_metrics(route_path: Optional[str] = None) -> Dict:
+    """Get route metrics."""
+    return api_gateway.get_route_metrics(route_path)
