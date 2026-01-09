@@ -19,10 +19,11 @@ from cryptography.hazmat.backends import default_backend
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Union
 from enum import Enum
+import logging
 
-from utils.logging_config import get_logger
-
-logger = get_logger(__name__)
+# Configure basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class EncryptionAlgorithm(Enum):
@@ -73,8 +74,9 @@ class AdvancedEncryption:
 
         # Homomorphic encryption context (placeholder)
         self.he_context = None
+        self.last_quantum_key = None  # HACK: for demoing the placeholder quantum feature
 
-        self.logger = get_logger(__name__)
+        self.logger = logging.getLogger(__name__)
         self.logger.info("Advanced Encryption system initialized")
 
     def _get_default_config(self) -> Dict:
@@ -403,12 +405,70 @@ class AdvancedEncryption:
 
         return plaintext
 
+    async def sign_data(self, data: bytes, key_id: str) -> bytes:
+        """
+        Create a digital signature for the data.
+
+        Args:
+            data: The data to be signed.
+            key_id: The ID of the private EC key to use for signing.
+
+        Returns:
+            The digital signature.
+        """
+        key_info = self.get_key_info(key_id)
+        if not key_info or key_info['type'] != KeyType.ASYMMETRIC_PRIVATE.value:
+            raise ValueError(f"A valid private asymmetric key is required for signing. Key ID: {key_id}")
+
+        private_key = key_info['key']
+        if not isinstance(private_key, ec.EllipticCurvePrivateKey):
+            raise TypeError("Signing requires an Elliptic Curve private key.")
+
+        signature = private_key.sign(
+            data,
+            ec.ECDSA(hashes.SHA256())
+        )
+        return signature
+
+    async def verify_signature(self, data: bytes, signature: bytes, key_id: str) -> bool:
+        """
+        Verify the digital signature of the data.
+
+        Args:
+            data: The data that was signed.
+            signature: The signature to verify.
+            key_id: The ID of the private key whose public part will be used for verification.
+
+        Returns:
+            True if the signature is valid, False otherwise.
+        """
+        key_info = self.get_key_info(key_id)
+        if not key_info:
+            raise ValueError(f"Key ID {key_id} not found.")
+
+        private_key = key_info['key']
+        public_key = private_key.public_key()
+
+        if not isinstance(public_key, ec.EllipticCurvePublicKey):
+            raise TypeError("Verification requires an Elliptic Curve public key.")
+
+        try:
+            public_key.verify(
+                signature,
+                data,
+                ec.ECDSA(hashes.SHA256())
+            )
+            return True
+        except Exception: # Catches InvalidSignature specifically
+            return False
+
     async def _add_quantum_resistance(self, encrypted_data: Dict) -> Dict:
         """Add quantum resistance layer (simplified implementation)."""
         # In a real implementation, this would use CRYSTALS-Kyber or similar
         # For now, add an additional symmetric encryption layer
 
         quantum_key = secrets.token_bytes(32)
+        self.last_quantum_key = quantum_key # HACK: Store key for demo
         quantum_alg = EncryptionAlgorithm.AES_256_GCM
 
         # Serialize the encrypted data
@@ -430,8 +490,10 @@ class AdvancedEncryption:
             return encrypted_data
 
         # In real implementation, retrieve quantum key securely
-        # For now, assume we have it
-        quantum_key = secrets.token_bytes(32)  # This would be retrieved securely
+        # HACK: For demo, retrieve the key stored from the encryption step.
+        if self.last_quantum_key is None:
+            raise ValueError("Quantum key not found for this session. Decryption is not possible.")
+        quantum_key = self.last_quantum_key
 
         quantum_layer = encrypted_data["quantum_layer"]
         decrypted_data_str = await self._decrypt_symmetric(
@@ -522,6 +584,31 @@ class AdvancedEncryption:
             "operation": operation
         }
 
+    def derive_key_from_password(self, password: str, salt: bytes = None, key_length: int = 32) -> Tuple[bytes, bytes]:
+        """
+        Derive a secure key from a password using PBKDF2.
+
+        Args:
+            password: The password to derive the key from.
+            salt: A random salt. If not provided, a new one is generated.
+            key_length: The desired length of the derived key in bytes.
+
+        Returns:
+            A tuple containing the derived key and the salt used.
+        """
+        if salt is None:
+            salt = secrets.token_bytes(self.config.get("salt_size", 16))
+
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=key_length,
+            salt=salt,
+            iterations=self.config.get("iterations", 100000),
+            backend=default_backend()
+        )
+        key = kdf.derive(password.encode('utf-8'))
+        return key, salt
+
 
 # Global encryption instance
 advanced_encryption = AdvancedEncryption()
@@ -550,3 +637,70 @@ def get_key_info(key_id: str) -> Optional[Dict]:
 def list_encryption_keys() -> List[Dict]:
     """List encryption keys."""
     return advanced_encryption.list_keys()
+
+
+async def sign_data(data: bytes, key_id: str) -> bytes:
+    """Create a digital signature for data."""
+    return await advanced_encryption.sign_data(data, key_id)
+
+
+async def verify_signature(data: bytes, signature: bytes, key_id: str) -> bool:
+    """Verify a digital signature."""
+    return await advanced_encryption.verify_signature(data, signature, key_id)
+
+
+def derive_key_from_password(password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
+    """Derive a secure key from a password."""
+    return advanced_encryption.derive_key_from_password(password, salt)
+
+
+async def main_demo():
+    """Demonstrates the advanced encryption functionalities."""
+    print("--- Advanced Encryption Demo ---")
+
+    # 1. Symmetric Encryption/Decryption
+    print("\n1. Testing Symmetric Encryption (AES-256-GCM)...")
+    original_text = "This is a highly confidential message for the IoT platform."
+    encrypted_blob = await encrypt_data(original_text, algorithm='aes_256_gcm')
+    key_id = encrypted_blob['key_id']
+    print(f"   - Encrypted successfully. Key ID: {key_id}")
+    decrypted_text = await decrypt_data(encrypted_blob)
+    assert decrypted_text.decode('utf-8') == original_text
+    print("   - Decryption successful. Data matches.")
+
+    # 2. Digital Signature (ECDSA)
+    print("\n2. Testing Digital Signatures (ECDSA)...")
+    # Generate a new ECDSA key for signing
+    _, sign_key_id = await advanced_encryption._generate_key(EncryptionAlgorithm.ECDSA_P256)
+    print(f"   - Generated a new ECDSA key. Key ID: {sign_key_id}")
+
+    message_to_sign = b"This data must be authentic and integral."
+    signature = await sign_data(message_to_sign, sign_key_id)
+    print(f"   - Data signed. Signature length: {len(signature)} bytes.")
+
+    # Verification
+    is_valid = await verify_signature(message_to_sign, signature, sign_key_id)
+    assert is_valid
+    print(f"   - Signature verification successful: {is_valid}")
+
+    is_invalid = await verify_signature(b"tampered data", signature, sign_key_id)
+    assert not is_invalid
+    print(f"   - Verification of tampered data correctly failed: {not is_invalid}")
+
+    # 3. Key Derivation from Password
+    print("\n3. Testing Key Derivation from Password (PBKDF2)...")
+    password = "supersecretpassword123"
+    derived_key, salt = derive_key_from_password(password)
+    print(f"   - Derived a {len(derived_key)*8}-bit key from password.")
+    print(f"   - Salt (hex): {salt.hex()}")
+
+    # Verify that the same password and salt produce the same key
+    derived_key_2, _ = derive_key_from_password(password, salt)
+    assert derived_key == derived_key_2
+    print("   - Key derivation is deterministic and successful.")
+
+    print("\n--- Demo Complete ---")
+
+
+if __name__ == "__main__":
+    asyncio.run(main_demo())
