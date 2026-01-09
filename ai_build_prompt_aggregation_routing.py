@@ -1,678 +1,212 @@
 """
 AI Build Prompt Aggregation and Routing Module
 
-This module implements intelligent aggregation, processing, and routing of AI build prompts
-for industrial applications. It uses machine learning to optimize prompt routing and
-provides comprehensive monitoring and analytics.
+This module implements an intelligent, stateful router for aggregating, processing,
+and routing AI prompts to a dynamic registry of language models based on various
+strategies like cost, latency, and capability.
 """
 
 import asyncio
-import json
-import logging
-import uuid
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Union
-
+import time
+import random
+from typing import Any, Dict, List, Optional, Literal
+from collections import defaultdict
 import aiohttp
-import requests
+import logging
 
-from config import settings
-from utils.logging_config import LoggerMixin
-from utils.performance_monitor import monitor_operation
-from utils.security import SecurityError, input_validator, validate_input
+# Basic logging configuration
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Import core ML engines for integration
-try:
-    from automl_engine import automl_engine
-    from reinforcement_learning import rl_engine
+RoutingStrategy = Literal["best_capability", "lowest_cost", "lowest_latency", "balanced"]
 
-    AUTOML_AVAILABLE = True
-    RL_AVAILABLE = True
-except ImportError:
-    AUTOML_AVAILABLE = False
-    RL_AVAILABLE = False
-
-
-class AIBuildPromptAggregationRouting(LoggerMixin):
+class PromptRouter:
     """
-    Advanced AI build prompt aggregation and routing system.
-
-    This class provides intelligent processing, aggregation, and routing of AI build prompts
-    with ML-powered optimization and comprehensive monitoring capabilities.
+    An intelligent, stateful router for AI prompts.
     """
+    def __init__(self):
+        # Registry of available AI models with their metadata
+        self.model_registry: Dict[str, Dict] = {}
+        # Performance metrics tracked per model
+        self.performance_metrics: Dict[str, Dict] = defaultdict(lambda: {"total_cost": 0.0, "avg_latency_ms": 0.0, "requests": 0})
+        # History of routing decisions
+        self.routing_history: List[Dict] = []
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the AI build prompt aggregation and routing system.
+        # Initialize with some default models
+        self._register_default_models()
 
-        Args:
-            config: Optional configuration dictionary with routing rules and settings
-        """
-        self.config = config or {}
-
-        # Routing configuration
-        self.routing_rules: Dict[str, Dict[str, Any]] = self.config.get(
-            "routing_rules", {}
+    def _register_default_models(self):
+        """Registers a predefined set of AI models."""
+        self.register_model(
+            model_id="claude-3-opus",
+            capabilities=["complex_reasoning", "text_generation", "code_generation", "summarization"],
+            cost_per_1k_tokens=0.015,
+            base_latency_ms=800
         )
-        self.default_system = self.config.get("default_system", "default_ai_service")
-
-        # Processing settings
-        self.enable_ml_optimization = self.config.get("enable_ml_optimization", True)
-        self.batch_size = self.config.get("batch_size", 10)
-        self.max_concurrent_requests = self.config.get("max_concurrent_requests", 5)
-
-        # History and analytics
-        self.routing_history: List[Dict[str, Any]] = []
-        self.performance_metrics: Dict[str, Any] = {}
-        self.max_history_size = self.config.get("max_history_size", 10000)
-
-        # Caching and optimization
-        self.route_cache: Dict[str, str] = {}
-        self.cache_ttl_seconds = self.config.get("cache_ttl_seconds", 300)  # 5 minutes
-
-        # Async components
-        self._processing_queue = asyncio.Queue(maxsize=1000)
-        self._semaphore = asyncio.Semaphore(self.max_concurrent_requests)
-
-        self.logger.info("AIBuildPromptAggregationRouting initialized")
-
-    @validate_input({"prompts": {"type": "list", "required": True, "min_length": 1}})
-    @monitor_operation("ai_build_prompt_aggregation_routing.aggregate_prompts")
-    async def aggregate_prompts(self, prompts: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Aggregate and process AI build prompts asynchronously.
-
-        Args:
-            prompts: List of AI build prompt dictionaries
-
-        Returns:
-            Dictionary with aggregated and processed prompts
-
-        Raises:
-            ValueError: If prompts validation fails
-            SecurityError: If processing fails due to security constraints
-        """
-        try:
-            self.logger.info(f"Starting aggregation of {len(prompts)} prompts")
-
-            # Validate input prompts
-            validated_prompts = []
-            for prompt in prompts:
-                if not self._validate_prompt(prompt):
-                    self.logger.warning(
-                        f"Invalid prompt skipped: {prompt.get('id', 'unknown')}"
-                    )
-                    continue
-                validated_prompts.append(prompt)
-
-            if not validated_prompts:
-                raise ValueError("No valid prompts provided for aggregation")
-
-            # Process prompts in batches for efficiency
-            aggregated_results = {}
-            for i in range(0, len(validated_prompts), self.batch_size):
-                batch = validated_prompts[i : i + self.batch_size]
-                batch_results = await self._process_batch(batch)
-                aggregated_results.update(batch_results)
-
-            # Apply ML optimization if enabled
-            if self.enable_ml_optimization and AUTOML_AVAILABLE:
-                aggregated_results = await self._optimize_with_ml(aggregated_results)
-
-            # Update performance metrics
-            self._update_performance_metrics(aggregated_results)
-
-            self.logger.info(
-                f"Successfully aggregated {len(aggregated_results)} prompts"
-            )
-            return {
-                "aggregated_prompts": aggregated_results,
-                "total_processed": len(aggregated_results),
-                "batch_size": self.batch_size,
-                "processing_timestamp": datetime.now().isoformat(),
-                "ml_optimization_applied": self.enable_ml_optimization
-                and AUTOML_AVAILABLE,
-            }
-
-        except Exception as e:
-            self.logger.error(f"Prompt aggregation failed: {e}")
-            raise
-
-    async def _process_batch(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Process a batch of prompts asynchronously.
-
-        Args:
-            batch: List of prompts to process
-
-        Returns:
-            Dictionary of processed prompts
-        """
-        tasks = []
-        for prompt in batch:
-            task = asyncio.create_task(self._process_single_prompt_async(prompt))
-            tasks.append(task)
-
-        # Execute with concurrency control
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        processed_results = {}
-        for i, result in enumerate(results):
-            prompt_id = batch[i].get("id", f"prompt_{i}")
-            if isinstance(result, Exception):
-                self.logger.error(f"Failed to process prompt {prompt_id}: {result}")
-                # Add error information to results
-                processed_results[prompt_id] = {
-                    "original_prompt": batch[i],
-                    "error": str(result),
-                    "processed": False,
-                }
-            else:
-                processed_results[prompt_id] = result
-
-        return processed_results
-
-    async def _process_single_prompt_async(
-        self, prompt: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Process a single prompt asynchronously.
-
-        Args:
-            prompt: Prompt dictionary to process
-
-        Returns:
-            Processed prompt with metadata
-        """
-        async with self._semaphore:
-            try:
-                # Simulate async processing (could be API calls, ML inference, etc.)
-                await asyncio.sleep(0.01)  # Small delay for demonstration
-
-                processed_prompt = prompt.copy()
-
-                # Add comprehensive metadata
-                processed_prompt["metadata"] = {
-                    "timestamp": datetime.now().isoformat(),
-                    "source": prompt.get("source", "unknown"),
-                    "processing_id": str(uuid.uuid4()),
-                    "version": "2.0",
-                    "validation_status": "passed",
-                }
-
-                # Add processing history
-                self._add_to_history(
-                    {
-                        "prompt_id": prompt.get("id"),
-                        "action": "processed",
-                        "timestamp": datetime.now().isoformat(),
-                        "metadata": processed_prompt["metadata"],
-                    }
-                )
-
-                return processed_prompt
-
-            except Exception as e:
-                self.logger.error(f"Single prompt processing failed: {e}")
-                raise
-
-    @monitor_operation("ai_build_prompt_aggregation_routing.route_prompts")
-    async def route_prompts(self, aggregated_prompts: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Route processed prompts to appropriate target systems asynchronously.
-
-        Args:
-            aggregated_prompts: Dictionary of processed prompts
-
-        Returns:
-            Routing results and status
-
-        Raises:
-            ValueError: If routing configuration is invalid
-        """
-        try:
-            self.logger.info(f"Starting routing of {len(aggregated_prompts)} prompts")
-
-            routing_results = {}
-            routing_tasks = []
-
-            for prompt_id, prompt_data in aggregated_prompts.items():
-                if isinstance(prompt_data, dict) and prompt_data.get("processed", True):
-                    task = asyncio.create_task(
-                        self._route_single_prompt(prompt_id, prompt_data)
-                    )
-                    routing_tasks.append(task)
-                else:
-                    routing_results[prompt_id] = {
-                        "status": "skipped",
-                        "reason": "not processed or invalid",
-                    }
-
-            # Execute routing tasks
-            if routing_tasks:
-                routing_responses = await asyncio.gather(
-                    *routing_tasks, return_exceptions=True
-                )
-
-                for i, response in enumerate(routing_responses):
-                    prompt_id = list(aggregated_prompts.keys())[i]
-                    if isinstance(response, Exception):
-                        routing_results[prompt_id] = {
-                            "status": "failed",
-                            "error": str(response),
-                        }
-                    else:
-                        routing_results[prompt_id] = response
-
-            # Update routing history
-            self._add_to_history(
-                {
-                    "action": "batch_routed",
-                    "total_prompts": len(aggregated_prompts),
-                    "successful_routes": len(
-                        [
-                            r
-                            for r in routing_results.values()
-                            if r.get("status") == "success"
-                        ]
-                    ),
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
-
-            self.logger.info(
-                f"Routing completed: {len(routing_results)} prompts processed"
-            )
-            return {
-                "routing_results": routing_results,
-                "summary": {
-                    "total": len(routing_results),
-                    "successful": len(
-                        [
-                            r
-                            for r in routing_results.values()
-                            if r.get("status") == "success"
-                        ]
-                    ),
-                    "failed": len(
-                        [
-                            r
-                            for r in routing_results.values()
-                            if r.get("status") == "failed"
-                        ]
-                    ),
-                },
-            }
-
-        except Exception as e:
-            self.logger.error(f"Prompt routing failed: {e}")
-            raise
-
-    async def _route_single_prompt(
-        self, prompt_id: str, prompt_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Route a single prompt to its target system.
-
-        Args:
-            prompt_id: Unique prompt identifier
-            prompt_data: Processed prompt data
-
-        Returns:
-            Routing result status
-        """
-        try:
-            # Determine target system
-            target_system = self._determine_routing(prompt_data)
-
-            # Check cache first
-            cache_key = f"{prompt_id}_{hash(str(prompt_data))}"
-            if cache_key in self.route_cache:
-                cached_target = self.route_cache[cache_key]
-                if cached_target == target_system:
-                    self.logger.debug(f"Using cached route for prompt {prompt_id}")
-                    return {
-                        "status": "success",
-                        "target_system": target_system,
-                        "method": "cached",
-                    }
-
-            # Send to target system
-            success = await self._send_to_system_async(target_system, prompt_data)
-
-            if success:
-                # Cache successful routing
-                self.route_cache[cache_key] = target_system
-
-                # Clean old cache entries
-                self._clean_route_cache()
-
-                return {
-                    "status": "success",
-                    "target_system": target_system,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            else:
-                return {
-                    "status": "failed",
-                    "target_system": target_system,
-                    "error": "system unreachable",
-                }
-
-        except Exception as e:
-            self.logger.error(f"Single prompt routing failed for {prompt_id}: {e}")
-            return {"status": "error", "error": str(e)}
-
-    def _determine_routing(self, prompt: Dict[str, Any]) -> str:
-        """
-        Determine the target system for a prompt based on routing rules.
-
-        Args:
-            prompt: Processed prompt data
-
-        Returns:
-            Target system identifier
-        """
-        try:
-            # Extract routing criteria
-            prompt_type = prompt.get("type", "unknown")
-            priority = prompt.get("priority", "normal")
-            source = prompt.get("source", "unknown")
-
-            # Check specific routing rules
-            for rule_name, rule_config in self.routing_rules.items():
-                if self._matches_rule(prompt, rule_config):
-                    self.logger.debug(
-                        f"Prompt routed via rule '{rule_name}' to {rule_config.get('target')}"
-                    )
-                    return rule_config.get("target", self.default_system)
-
-            # Fallback to default system
-            self.logger.debug(
-                f"No matching rule found, using default system for prompt type '{prompt_type}'"
-            )
-            return self.default_system
-
-        except Exception as e:
-            self.logger.error(f"Routing determination failed: {e}")
-            return self.default_system
-
-    def _matches_rule(self, prompt: Dict[str, Any], rule: Dict[str, Any]) -> bool:
-        """
-        Check if a prompt matches a routing rule.
-
-        Args:
-            prompt: Prompt data
-            rule: Routing rule configuration
-
-        Returns:
-            True if rule matches, False otherwise
-        """
-        try:
-            # Check conditions
-            conditions = rule.get("conditions", {})
-
-            for condition_key, condition_value in conditions.items():
-                prompt_value = prompt.get(condition_key)
-                if prompt_value != condition_value:
-                    return False
-
-            return True
-
-        except Exception:
-            return False
-
-    async def _send_to_system_async(
-        self, target_system: str, prompt: Dict[str, Any]
-    ) -> bool:
-        """
-        Send prompt to target system asynchronously.
-
-        Args:
-            target_system: Target system identifier
-            prompt: Prompt data to send
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Get system configuration
-            system_config = self._get_system_config(target_system)
-            if not system_config:
-                self.logger.error(f"No configuration found for system {target_system}")
-                return False
-
-            url = system_config.get("url")
-            if not url:
-                self.logger.error(f"No URL configured for system {target_system}")
-                return False
-
-            # Prepare request
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {system_config.get('api_key', '')}",
-            }
-
-            payload = {
-                "prompt": prompt,
-                "routing_metadata": {
-                    "source_system": "ai_build_prompt_aggregator",
-                    "timestamp": datetime.now().isoformat(),
-                    "version": "2.0",
-                },
-            }
-
-            # Send async request
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, headers=headers) as response:
-                    if response.status == 200:
-                        self.logger.debug(
-                            f"Successfully sent prompt to {target_system}"
-                        )
-                        return True
-                    else:
-                        response_text = await response.text()
-                        self.logger.error(
-                            f"Failed to send to {target_system}: {response.status} - {response_text}"
-                        )
-                        return False
-
-        except Exception as e:
-            self.logger.error(f"Error sending to system {target_system}: {e}")
-            return False
-
-    def _get_system_config(self, system_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Get configuration for a target system.
-
-        Args:
-            system_name: Name of the target system
-
-        Returns:
-            System configuration dictionary or None
-        """
-        # This would typically load from config or database
-        # For now, return mock configuration
-        mock_configs = {
-            "default_ai_service": {
-                "url": "https://api.example.com/v1/prompts",
-                "api_key": "mock_key",
-            },
-            "industrial_ai": {
-                "url": "https://industrial-ai.example.com/api/process",
-                "api_key": "industrial_key",
-            },
-            "cloud_ml": {
-                "url": "https://cloud-ml.example.com/v1/inference",
-                "api_key": "cloud_key",
-            },
+        self.register_model(
+            model_id="gpt-4-turbo",
+            capabilities=["text_generation", "code_generation", "json_output"],
+            cost_per_1k_tokens=0.010,
+            base_latency_ms=500
+        )
+        self.register_model(
+            model_id="gemini-1.5-pro",
+            capabilities=["multi_modal", "text_generation", "summarization"],
+            cost_per_1k_tokens=0.007,
+            base_latency_ms=650
+        )
+        self.register_model(
+            model_id="llama-3-8b",
+            capabilities=["text_generation", "fast_response"],
+            cost_per_1k_tokens=0.0002,
+            base_latency_ms=150
+        )
+
+    def register_model(self, model_id: str, capabilities: List[str], cost_per_1k_tokens: float, base_latency_ms: int):
+        """Adds a new AI model to the router's registry."""
+        self.model_registry[model_id] = {
+            "capabilities": set(capabilities),
+            "cost_per_1k_tokens": cost_per_1k_tokens,
+            "base_latency_ms": base_latency_ms
+        }
+        logger.info(f"Registered model: {model_id}")
+
+    def _select_model(self, required_capability: str, strategy: RoutingStrategy) -> Optional[str]:
+        """Selects the best model based on the required capability and routing strategy."""
+        candidate_models = [m_id for m_id, m_data in self.model_registry.items() if required_capability in m_data["capabilities"]]
+
+        if not candidate_models:
+            return None
+
+        if strategy == "lowest_cost":
+            return min(candidate_models, key=lambda m_id: self.model_registry[m_id]["cost_per_1k_tokens"])
+
+        if strategy == "lowest_latency":
+            return min(candidate_models, key=lambda m_id: self.model_registry[m_id]["base_latency_ms"])
+
+        # "best_capability" or "balanced" can have more complex logic; for now, we'll use a simple heuristic
+        # A more advanced version might score models based on capability "strength"
+        return sorted(candidate_models, key=lambda m_id: self.model_registry[m_id]["cost_per_1k_tokens"], reverse=True)[0]
+
+    async def _mock_model_call(self, model_id: str, prompt: str) -> Dict:
+        """Simulates an API call to a language model."""
+        model_data = self.model_registry[model_id]
+        latency_ms = model_data["base_latency_ms"] + random.uniform(-50, 100)
+        await asyncio.sleep(latency_ms / 1000.0)
+
+        response_tokens = len(prompt.split()) * 1.5 # Simulate a response length
+        cost = (len(prompt.split()) + response_tokens) / 1000 * model_data["cost_per_1k_tokens"]
+
+        return {
+            "response": f"Mock response from {model_id} for prompt: '{prompt[:30]}...'",
+            "cost": cost,
+            "latency_ms": latency_ms
         }
 
-        return mock_configs.get(system_name)
+    def _update_metrics(self, model_id: str, cost: float, latency_ms: float):
+        """Updates the performance metrics for a given model."""
+        metrics = self.performance_metrics[model_id]
+        total_requests = metrics["requests"] + 1
+        metrics["total_cost"] += cost
+        # Update average latency using a moving average
+        metrics["avg_latency_ms"] = ((metrics["avg_latency_ms"] * metrics["requests"]) + latency_ms) / total_requests
+        metrics["requests"] = total_requests
 
-    async def _optimize_with_ml(
-        self, aggregated_prompts: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def route_prompt(self, prompt: str, required_capability: str, strategy: RoutingStrategy) -> Dict:
+        """Routes a single prompt to the best model and returns its response."""
+        start_time = time.time()
+        model_id = self._select_model(required_capability, strategy)
+
+        if not model_id:
+            return {"error": f"No model found with capability: {required_capability}"}
+
+        result = await self._mock_model_call(model_id, prompt)
+
+        self._update_metrics(model_id, result["cost"], result["latency_ms"])
+
+        decision = {
+            "prompt": prompt,
+            "strategy": strategy,
+            "selected_model": model_id,
+            "result": result,
+            "timestamp": time.time()
+        }
+        self.routing_history.append(decision)
+
+        return decision
+
+    async def route_and_aggregate(self, prompts: List[Dict], final_aggregator_strategy: RoutingStrategy) -> Dict:
         """
-        Optimize prompt routing using integrated ML engines.
-
-        Args:
-            aggregated_prompts: Current aggregated prompts
-
-        Returns:
-            ML-optimized prompts
+        Routes multiple prompts in parallel, then aggregates their responses into a final summary.
+        Example prompt: {"prompt": "Summarize this text...", "capability": "summarization", "strategy": "lowest_cost"}
         """
-        if not AUTOML_AVAILABLE:
-            return aggregated_prompts
+        tasks = [self.route_prompt(p["prompt"], p["capability"], p["strategy"]) for p in prompts]
+        results = await asyncio.gather(*tasks)
 
-        try:
-            # Use AutoML to optimize routing decisions
-            # This is a placeholder for actual ML optimization
-            self.logger.info("Applying ML optimization to prompt routing")
+        # Filter out errors and collect responses
+        successful_responses = [r['result']['response'] for r in results if 'error' not in r]
 
-            # Mock optimization - in reality would use historical data
-            # to predict optimal routing targets
-            optimized = aggregated_prompts.copy()
+        if not successful_responses:
+            return {"error": "All sub-prompts failed.", "details": results}
 
-            for prompt_id, prompt_data in optimized.items():
-                if isinstance(prompt_data, dict):
-                    prompt_data["ml_optimized"] = True
-                    prompt_data["optimization_timestamp"] = datetime.now().isoformat()
+        # Aggregate the responses using another model call
+        aggregation_prompt = "Synthesize the following pieces of information into a single, coherent answer: \n\n" + "\n\n".join(successful_responses)
 
-            return optimized
+        final_decision = await self.route_prompt(
+            prompt=aggregation_prompt,
+            required_capability="complex_reasoning", # Use a powerful model for aggregation
+            strategy=final_aggregator_strategy
+        )
 
-        except Exception as e:
-            self.logger.error(f"ML optimization failed: {e}")
-            return aggregated_prompts
+        return {
+            "final_response": final_decision,
+            "intermediate_results": results
+        }
 
-    def _validate_prompt(self, prompt: Dict[str, Any]) -> bool:
-        """
-        Validate a prompt structure.
+    def get_performance_dashboard(self) -> Dict:
+        """Returns a summary of performance metrics for all models."""
+        return {model_id: {
+            "total_cost": round(data["total_cost"], 4),
+            "avg_latency_ms": round(data["avg_latency_ms"]),
+            "requests": data["requests"]
+        } for model_id, data in self.performance_metrics.items()}
 
-        Args:
-            prompt: Prompt dictionary to validate
 
-        Returns:
-            True if valid, False otherwise
-        """
-        required_fields = ["id", "type"]
-        for field in required_fields:
-            if field not in prompt:
-                return False
+if __name__ == '__main__':
+    async def main():
+        router = PromptRouter()
 
-        # Additional validation logic can be added here
-        return True
+        print("--- Model Registry ---")
+        print(router.model_registry)
 
-    def _add_to_history(self, history_entry: Dict[str, Any]) -> None:
-        """
-        Add entry to routing history.
+        print("\n--- 1. Simple Routing: Find the cheapest model for summarization ---")
+        result1 = await router.route_prompt(
+            prompt="Summarize the history of the internet in 100 words.",
+            required_capability="summarization",
+            strategy="lowest_cost"
+        )
+        print(f"Selected Model: {result1['selected_model']}")
+        print(f"Response: {result1['result']['response']}")
 
-        Args:
-            history_entry: History entry to add
-        """
-        self.routing_history.append(history_entry)
+        print("\n--- 2. Simple Routing: Find the fastest model for code generation ---")
+        result2 = await router.route_prompt(
+            prompt="Write a Python function to calculate fibonacci.",
+            required_capability="code_generation",
+            strategy="lowest_latency"
+        )
+        print(f"Selected Model: {result2['selected_model']}")
+        print(f"Response: {result2['result']['response']}")
 
-        # Limit history size
-        if len(self.routing_history) > self.max_history_size:
-            self.routing_history = self.routing_history[-self.max_history_size :]
+        print("\n--- 3. Aggregation: Ask two models for info and a third to synthesize it ---")
+        multi_prompts = [
+            {"prompt": "What is the capital of France?", "capability": "text_generation", "strategy": "lowest_cost"},
+            {"prompt": "What is the population of Paris?", "capability": "text_generation", "strategy": "lowest_latency"}
+        ]
+        aggregation_result = await router.route_and_aggregate(multi_prompts, final_aggregator_strategy="best_capability")
+        print("Final Synthesized Response:")
+        print(aggregation_result['final_response']['result']['response'])
 
-    def _update_performance_metrics(self, results: Dict[str, Any]) -> None:
-        """
-        Update performance metrics based on processing results.
+        print("\n--- Performance Dashboard ---")
+        print(router.get_performance_dashboard())
 
-        Args:
-            results: Processing results to analyze
-        """
-        try:
-            total_processed = len(results)
-            successful_routes = len(
-                [
-                    r
-                    for r in results.values()
-                    if isinstance(r, dict) and r.get("processed") != False
-                ]
-            )
-
-            self.performance_metrics.update(
-                {
-                    "last_batch_size": total_processed,
-                    "last_success_rate": successful_routes / total_processed
-                    if total_processed > 0
-                    else 0,
-                    "total_processed": self.performance_metrics.get(
-                        "total_processed", 0
-                    )
-                    + total_processed,
-                    "last_update": datetime.now().isoformat(),
-                }
-            )
-
-        except Exception as e:
-            self.logger.error(f"Performance metrics update failed: {e}")
-
-    def _clean_route_cache(self) -> None:
-        """
-        Clean expired entries from route cache.
-        """
-        try:
-            cutoff_time = datetime.now() - timedelta(seconds=self.cache_ttl_seconds)
-            # In a real implementation, cache entries would have timestamps
-            # For now, just limit cache size
-            if len(self.route_cache) > 1000:
-                # Remove oldest entries (simplified)
-                items_to_remove = len(self.route_cache) - 500
-                keys_to_remove = list(self.route_cache.keys())[:items_to_remove]
-                for key in keys_to_remove:
-                    del self.route_cache[key]
-
-        except Exception as e:
-            self.logger.error(f"Cache cleaning failed: {e}")
-
-    def get_routing_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """
-        Get routing history with optional limit.
-
-        Args:
-            limit: Maximum number of history entries to return
-
-        Returns:
-            List of routing history entries
-        """
-        if limit:
-            return self.routing_history[-limit:]
-        return self.routing_history
-
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """
-        Get current performance metrics.
-
-        Returns:
-            Dictionary with performance metrics
-        """
-        return self.performance_metrics.copy()
-
-    def clear_history(self) -> None:
-        """
-        Clear routing history.
-        """
-        self.routing_history.clear()
-        self.logger.info("Routing history cleared")
-
-    def update_routing_rules(self, new_rules: Dict[str, Dict[str, Any]]) -> None:
-        """
-        Update routing rules dynamically.
-
-        Args:
-            new_rules: New routing rules to apply
-        """
-        try:
-            self.routing_rules.update(new_rules)
-            # Clear cache when rules change
-            self.route_cache.clear()
-            self.logger.info(
-                f"Updated routing rules: {len(new_rules)} rules added/modified"
-            )
-
-        except Exception as e:
-            self.logger.error(f"Failed to update routing rules: {e}")
-            raise
+    asyncio.run(main())
