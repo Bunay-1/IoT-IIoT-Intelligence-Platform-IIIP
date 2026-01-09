@@ -74,7 +74,6 @@ class AdvancedEncryption:
 
         # Homomorphic encryption context (placeholder)
         self.he_context = None
-        self.last_quantum_key = None  # HACK: for demoing the placeholder quantum feature
 
         self.logger = logging.getLogger(__name__)
         self.logger.info("Advanced Encryption system initialized")
@@ -141,7 +140,9 @@ class AdvancedEncryption:
 
             # Add quantum resistance if enabled
             if self.quantum_resistant_enabled:
-                result = await self._add_quantum_resistance(result)
+                result, quantum_key = await self._add_quantum_resistance(result)
+                # For the demo, we embed the key. In a real system, this would be managed securely.
+                result['ephemeral_quantum_key'] = quantum_key
 
             # Add metadata
             result.update({
@@ -184,7 +185,8 @@ class AdvancedEncryption:
 
             # Remove quantum resistance layer if present
             if encrypted_data.get("quantum_resistant"):
-                encrypted_data = await self._remove_quantum_resistance(encrypted_data)
+                quantum_key = encrypted_data.get('ephemeral_quantum_key')
+                encrypted_data = await self._remove_quantum_resistance(encrypted_data, quantum_key)
 
             # Perform decryption based on algorithm
             if algorithm in [EncryptionAlgorithm.AES_256_GCM, EncryptionAlgorithm.AES_256_CBC]:
@@ -462,38 +464,35 @@ class AdvancedEncryption:
         except Exception: # Catches InvalidSignature specifically
             return False
 
-    async def _add_quantum_resistance(self, encrypted_data: Dict) -> Dict:
-        """Add quantum resistance layer (simplified implementation)."""
-        # In a real implementation, this would use CRYSTALS-Kyber or similar
-        # For now, add an additional symmetric encryption layer
-
+    async def _add_quantum_resistance(self, encrypted_data: Dict) -> Tuple[Dict, bytes]:
+        """
+        Add quantum resistance layer (simplified implementation).
+        Returns the modified encrypted data and the ephemeral quantum key used.
+        """
         quantum_key = secrets.token_bytes(32)
-        self.last_quantum_key = quantum_key # HACK: Store key for demo
         quantum_alg = EncryptionAlgorithm.AES_256_GCM
 
-        # Serialize the encrypted data
         data_to_protect = str(encrypted_data).encode('utf-8')
-
         quantum_encrypted = await self._encrypt_symmetric(
             data_to_protect, quantum_key, quantum_alg
         )
 
-        return {
+        result = {
             "quantum_layer": quantum_encrypted,
             "quantum_key_fingerprint": hashlib.sha256(quantum_key).hexdigest()[:16],
             "original_data": encrypted_data
         }
+        return result, quantum_key
 
-    async def _remove_quantum_resistance(self, encrypted_data: Dict) -> Dict:
-        """Remove quantum resistance layer."""
+    async def _remove_quantum_resistance(self, encrypted_data: Dict, quantum_key: bytes) -> Dict:
+        """
+        Remove quantum resistance layer using the provided key.
+        """
         if "quantum_layer" not in encrypted_data:
             return encrypted_data
 
-        # In real implementation, retrieve quantum key securely
-        # HACK: For demo, retrieve the key stored from the encryption step.
-        if self.last_quantum_key is None:
-            raise ValueError("Quantum key not found for this session. Decryption is not possible.")
-        quantum_key = self.last_quantum_key
+        if quantum_key is None:
+            raise ValueError("A quantum key is required for decryption of the quantum layer.")
 
         quantum_layer = encrypted_data["quantum_layer"]
         decrypted_data_str = await self._decrypt_symmetric(
