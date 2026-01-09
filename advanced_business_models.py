@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 import json
+from collections import defaultdict
 
 class SubscriptionTierManager:
     """
@@ -46,58 +47,57 @@ class SubscriptionTierManager:
                 'base_price': 999,
                 'features': ['full_platform', 'white_label', 'unlimited_devices', 'priority_support'],
                 'limits': {'devices': -1, 'api_calls': -1, 'storage_gb': -1}  # -1 = unlimited
-            },
-            'custom': {
-                'name': 'Custom Enterprise',
-                'base_price': 0,  # Custom pricing
-                'features': ['tailored_solution', 'dedicated_support', 'custom_integrations'],
-                'limits': {}  # Custom limits
             }
         }
-
         self.usage_pricing = {
-            'device_overage': 15,  # per additional device
-            'api_overage': 0.01,   # per additional API call
-            'storage_overage': 0.5  # per additional GB
+            'device_overage': 15,
+            'api_overage': 0.01,
+            'storage_overage': 0.5
+        }
+        # State management
+        self.customers: Dict[str, Dict[str, Any]] = {}
+
+    def add_customer(self, customer_id: str, tier: str):
+        """Adds a new customer with a specified subscription tier."""
+        if tier not in self.tiers:
+            raise ValueError(f"Invalid tier: {tier}")
+        self.customers[customer_id] = {
+            "tier": tier,
+            "current_usage": defaultdict(int),
+            "onboarded_date": datetime.utcnow()
         }
 
-    def calculate_subscription_cost(self, tier: str, usage: Dict[str, int],
-                                  billing_period: str = 'monthly') -> Dict[str, Any]:
+    def log_customer_usage(self, customer_id: str, usage_data: Dict[str, int]):
+        """Logs resource usage for a customer."""
+        if customer_id not in self.customers:
+            raise ValueError(f"Customer {customer_id} not found.")
+        for metric, value in usage_data.items():
+            self.customers[customer_id]["current_usage"][metric] += value
+
+    def calculate_subscription_cost(self, customer_id: str, billing_period: str = 'monthly') -> Dict[str, Any]:
         """
-        Calculate subscription cost based on tier and usage.
-
-        Args:
-            tier: Subscription tier
-            usage: Actual usage metrics
-            billing_period: Billing period (monthly/yearly)
-
-        Returns:
-            Dict[str, Any]: Cost breakdown and recommendations
+        Calculate subscription cost for a specific customer based on their state.
         """
-        if tier not in self.tiers:
-            return {"error": f"Invalid tier: {tier}"}
+        if customer_id not in self.customers:
+            return {"error": f"Customer not found: {customer_id}"}
 
+        customer_data = self.customers[customer_id]
+        tier = customer_data["tier"]
+        usage = customer_data["current_usage"]
         tier_config = self.tiers[tier]
         base_cost = tier_config['base_price']
         limits = tier_config['limits']
 
-        # Calculate overage costs
         overage_cost = 0
         overages = {}
-
         for metric, limit in limits.items():
-            if limit != -1:  # Not unlimited
+            if limit != -1:
                 actual_usage = usage.get(metric, 0)
                 if actual_usage > limit:
                     overage = actual_usage - limit
                     overage_rate = self.usage_pricing.get(f'{metric}_overage', 0)
                     overage_cost += overage * overage_rate
-                    overages[metric] = {
-                        'limit': limit,
-                        'actual': actual_usage,
-                        'overage': overage,
-                        'cost': overage * overage_rate
-                    }
+                    overages[metric] = {'limit': limit, 'actual': actual_usage, 'overage': overage, 'cost': overage * overage_rate}
 
         total_cost = base_cost + overage_cost
 
@@ -105,112 +105,72 @@ class SubscriptionTierManager:
         if billing_period == 'yearly':
             total_cost *= 12 * 0.9  # 10% discount for yearly
 
-        # Generate recommendations
-        recommendations = self._generate_tier_recommendations(tier, usage, overages)
+        recommendations = self._generate_tier_recommendations(customer_id, overages)
 
         return {
+            'customer_id': customer_id,
             'tier': tier,
             'base_cost': base_cost,
             'overage_cost': overage_cost,
             'total_cost': round(total_cost, 2),
             'billing_period': billing_period,
             'overages': overages,
-            'recommendations': recommendations,
-            'cost_breakdown': {
-                'subscription': base_cost,
-                'overages': overage_cost,
-                'discounts': total_cost - (base_cost + overage_cost) if billing_period == 'yearly' else 0
-            }
+            'recommendations': recommendations
         }
 
-    def recommend_optimal_tier(self, usage: Dict[str, int], budget: float = None) -> Dict[str, Any]:
+    def recommend_optimal_tier(self, customer_id: str, budget: float = None) -> Dict[str, Any]:
         """
-        Recommend the optimal subscription tier based on usage and budget.
-
-        Args:
-            usage: Expected usage metrics
-            budget: Monthly budget constraint
-
-        Returns:
-            Dict[str, Any]: Tier recommendation
+        Recommend the optimal subscription tier for a customer based on their usage.
         """
+        if customer_id not in self.customers:
+            return {"error": f"Customer not found: {customer_id}"}
+
+        usage = self.customers[customer_id]["current_usage"]
         tier_scores = {}
 
         for tier_name, tier_config in self.tiers.items():
-            if tier_name == 'custom':
-                continue  # Skip custom for automated recommendations
-
             score = 0
             limits = tier_config['limits']
-
-            # Score based on how well limits fit usage
             for metric, limit in limits.items():
-                if limit == -1:  # Unlimited
-                    score += 10
+                if limit == -1: score += 10
                 else:
                     actual = usage.get(metric, 0)
-                    if actual <= limit:
-                        score += 5
-                    elif actual <= limit * 1.5:  # Within 50% overage
-                        score += 2
-                    else:
-                        score -= 2  # Significant overage
+                    if actual <= limit: score += 5
+                    elif actual <= limit * 1.5: score += 2
+                    else: score -= 2
 
-            # Score based on features needed
             features_needed = self._assess_feature_needs(usage)
             available_features = set(tier_config['features'])
-            feature_coverage = len(features_needed & available_features) / len(features_needed)
+            feature_coverage = len(features_needed & available_features) / max(len(features_needed), 1)
             score += feature_coverage * 5
-
             tier_scores[tier_name] = score
 
-        # Get best tier
-        best_tier = max(tier_scores.items(), key=lambda x: x[1])
+        best_tier_name = max(tier_scores, key=tier_scores.get)
 
-        # Calculate cost for best tier
-        cost_analysis = self.calculate_subscription_cost(best_tier[0], usage)
-
-        # Check budget constraint
-        if budget and cost_analysis['total_cost'] > budget:
-            # Find most expensive tier within budget
-            affordable_tiers = [
-                (tier, self.calculate_subscription_cost(tier, usage)['total_cost'])
-                for tier in self.tiers.keys() if tier != 'custom'
-            ]
-            affordable_tiers = [(t, c) for t, c in affordable_tiers if c <= budget]
-
-            if affordable_tiers:
-                best_tier = max(affordable_tiers, key=lambda x: x[1])
-                cost_analysis = self.calculate_subscription_cost(best_tier[0], usage)
+        # Temporarily set customer tier to get cost analysis
+        original_tier = self.customers[customer_id]['tier']
+        self.customers[customer_id]['tier'] = best_tier_name
+        cost_analysis = self.calculate_subscription_cost(customer_id)
+        self.customers[customer_id]['tier'] = original_tier # Revert
 
         return {
-            'recommended_tier': best_tier[0],
-            'confidence_score': min(best_tier[1] / 10, 1.0),  # Normalize to 0-1
-            'cost_analysis': cost_analysis,
-            'alternative_tiers': sorted(tier_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+            'recommended_tier': best_tier_name,
+            'confidence_score': min(tier_scores[best_tier_name] / 15, 1.0),
+            'cost_analysis': cost_analysis
         }
 
-    def _generate_tier_recommendations(self, current_tier: str, usage: Dict[str, int],
-                                     overages: Dict[str, Any]) -> List[str]:
+    def _generate_tier_recommendations(self, customer_id: str, overages: Dict[str, Any]) -> List[str]:
         """
-        Generate tier-related recommendations.
+        Generate tier-related recommendations for a specific customer.
         """
         recommendations = []
-
         if overages:
-            recommendations.append("Consider upgrading to a higher tier to avoid overage charges")
+            recommendations.append("Consider upgrading to a higher tier to avoid overage charges.")
 
-        # Check if current tier is optimal
-        optimal = self.recommend_optimal_tier(usage)
-        if optimal['recommended_tier'] != current_tier:
-            recommendations.append(f"Consider switching to {optimal['recommended_tier']} tier for better value")
-
-        # Billing cycle recommendations
-        cost_monthly = self.calculate_subscription_cost(current_tier, usage, 'monthly')['total_cost']
-        cost_yearly = self.calculate_subscription_cost(current_tier, usage, 'yearly')['total_cost']
-
-        if cost_yearly < cost_monthly * 12:
-            recommendations.append("Consider yearly billing for cost savings")
+        optimal = self.recommend_optimal_tier(customer_id)
+        current_tier = self.customers[customer_id]['tier']
+        if optimal.get('recommended_tier') != current_tier:
+            recommendations.append(f"Optimal tier seems to be '{optimal['recommended_tier']}'. Consider switching for better value.")
 
         return recommendations
 
@@ -232,417 +192,163 @@ class SubscriptionTierManager:
         return features_needed
 
 class APIMonetizationManager:
-    """
-    Manages API monetization and marketplace.
-    """
+    """Manages API monetization and marketplace."""
 
     def __init__(self):
         self.api_endpoints = {
             'data_ingestion': {'base_price': 0.001, 'unit': 'per_request'},
             'analytics_query': {'base_price': 0.01, 'unit': 'per_query'},
-            'predictive_model': {'base_price': 0.1, 'unit': 'per_prediction'},
-            'real_time_stream': {'base_price': 0.005, 'unit': 'per_minute'},
-            'bulk_export': {'base_price': 0.05, 'unit': 'per_gb'}
         }
-
         self.api_plans = {
             'free': {'monthly_limit': 1000, 'price': 0},
             'developer': {'monthly_limit': 10000, 'price': 29},
-            'business': {'monthly_limit': 100000, 'price': 99},
-            'enterprise': {'monthly_limit': -1, 'price': 299}  # Unlimited
         }
+        self.api_users = {} # State management
 
-    def calculate_api_cost(self, usage: Dict[str, int], plan: str = 'free') -> Dict[str, Any]:
-        """
-        Calculate API usage costs.
-
-        Args:
-            usage: API usage by endpoint
-            plan: Subscription plan
-
-        Returns:
-            Dict[str, Any]: Cost analysis
-        """
+    def add_api_user(self, user_id: str, plan: str):
         if plan not in self.api_plans:
-            return {"error": f"Invalid plan: {plan}"}
+            raise ValueError(f"Invalid API plan: {plan}")
+        self.api_users[user_id] = {"plan": plan, "usage": defaultdict(int)}
 
+    def log_api_usage(self, user_id: str, endpoint: str, count: int):
+        if user_id not in self.api_users:
+            raise ValueError(f"API user {user_id} not found.")
+        self.api_users[user_id]["usage"][endpoint] += count
+
+    def calculate_api_cost(self, user_id: str) -> Dict[str, Any]:
+        if user_id not in self.api_users:
+            return {"error": f"API user not found: {user_id}"}
+
+        user_data = self.api_users[user_id]
+        plan = user_data["plan"]
+        usage = user_data["usage"]
         plan_config = self.api_plans[plan]
-        monthly_limit = plan_config['monthly_limit']
-        plan_cost = plan_config['price']
 
         total_requests = sum(usage.values())
+        usage_cost = sum(self.api_endpoints[e]['base_price'] * c for e, c in usage.items() if e in self.api_endpoints)
+
+        # Simplified overage
         overage_cost = 0
-        breakdown = {}
-
-        # Calculate costs for each endpoint
-        for endpoint, count in usage.items():
-            if endpoint in self.api_endpoints:
-                config = self.api_endpoints[endpoint]
-                cost = count * config['base_price']
-                breakdown[endpoint] = {
-                    'requests': count,
-                    'rate': config['base_price'],
-                    'cost': round(cost, 2)
-                }
-
-        total_cost = sum(item['cost'] for item in breakdown.values())
-
-        # Check limits and calculate overages
-        if monthly_limit != -1 and total_requests > monthly_limit:
-            overage_requests = total_requests - monthly_limit
-            overage_rate = 0.002  # $0.002 per additional request
-            overage_cost = overage_requests * overage_rate
-            total_cost += overage_cost
+        if plan_config['monthly_limit'] != -1 and total_requests > plan_config['monthly_limit']:
+            overage_cost = (total_requests - plan_config['monthly_limit']) * 0.002
 
         return {
+            'user_id': user_id,
             'plan': plan,
-            'plan_cost': plan_cost,
-            'usage_cost': round(total_cost - overage_cost, 2),
+            'plan_cost': plan_config['price'],
+            'usage_cost': round(usage_cost, 2),
             'overage_cost': round(overage_cost, 2),
-            'total_cost': round(plan_cost + total_cost, 2),
-            'total_requests': total_requests,
-            'monthly_limit': monthly_limit,
-            'breakdown': breakdown,
-            'recommendations': self._generate_api_recommendations(plan, total_requests, monthly_limit)
+            'total_cost': round(plan_config['price'] + usage_cost + overage_cost, 2)
         }
 
-    def optimize_api_pricing(self, usage_history: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Optimize API pricing based on usage patterns.
-
-        Args:
-            usage_history: Historical API usage data
-
-        Returns:
-            Dict[str, Any]: Pricing optimization recommendations
-        """
-        # Analyze usage patterns
-        total_usage = usage_history.sum(axis=1)
-        peak_usage = total_usage.max()
-        avg_usage = total_usage.mean()
-
-        # Calculate optimal pricing tiers
-        optimal_tiers = {}
-
-        for tier_name, config in self.api_plans.items():
-            if config['monthly_limit'] == -1:  # Unlimited
-                continue
-
-            limit = config['monthly_limit']
-            if avg_usage <= limit:
-                optimal_tiers[tier_name] = {
-                    'utilization': avg_usage / limit,
-                    'cost_effectiveness': config['price'] / limit if limit > 0 else 0
-                }
-
-        # Recommend pricing adjustments
-        recommendations = []
-        if peak_usage > avg_usage * 2:
-            recommendations.append("Consider usage-based pricing for high-variability customers")
-
-        if len(optimal_tiers) < 2:
-            recommendations.append("Consider adding intermediate pricing tiers")
-
-        return {
-            'current_metrics': {
-                'avg_monthly_usage': int(avg_usage),
-                'peak_monthly_usage': int(peak_usage),
-                'usage_volatility': peak_usage / avg_usage if avg_usage > 0 else 0
-            },
-            'optimal_tiers': optimal_tiers,
-            'recommendations': recommendations
-        }
-
-    def _generate_api_recommendations(self, plan: str, total_requests: int,
-                                    monthly_limit: int) -> List[str]:
-        """
-        Generate API usage recommendations.
-        """
-        recommendations = []
-
-        if monthly_limit != -1:
-            utilization = total_requests / monthly_limit
-            if utilization > 0.9:
-                recommendations.append("Consider upgrading to a higher plan to avoid limits")
-            elif utilization < 0.3:
-                recommendations.append("Consider downgrading to a more cost-effective plan")
-
-        # General recommendations
-        recommendations.extend([
-            "Implement API rate limiting to prevent abuse",
-            "Use API versioning for backward compatibility",
-            "Provide comprehensive API documentation"
-        ])
-
-        return recommendations
+    def optimize_api_pricing(self) -> Dict[str, Any]:
+        # This method would now analyze self.api_users to provide recommendations
+        return {"recommendation": "Analyze usage patterns in self.api_users to adjust plan limits and pricing."}
 
 class PartnerEcosystemManager:
-    """
-    Manages partner ecosystems and integrations.
-    """
+    """Manages partner ecosystems and integrations."""
 
     def __init__(self):
         self.partners = {}
         self.integrations = {}
         self.revenue_sharing_models = {
-            'revenue_share': {'partner_percentage': 0.3, 'platform_percentage': 0.7},
-            'subscription_split': {'partner_percentage': 0.2, 'platform_percentage': 0.8},
+            'revenue_share': {'partner_percentage': 0.3},
             'per_transaction': {'fixed_fee': 0.05, 'variable_fee': 0.02}
         }
 
-    def onboard_partner(self, partner_info: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Onboard a new partner to the ecosystem.
-
-        Args:
-            partner_info: Partner information and requirements
-
-        Returns:
-            Dict[str, Any]: Onboarding results
-        """
+    def onboard_partner(self, partner_info: Dict[str, Any]) -> str:
         partner_id = f"partner_{len(self.partners) + 1}"
-
-        partner = {
+        self.partners[partner_id] = {
             'id': partner_id,
             'name': partner_info['name'],
-            'type': partner_info['type'],  # technology, integration, reseller, etc.
-            'specialization': partner_info.get('specialization', []),
             'revenue_model': partner_info.get('revenue_model', 'revenue_share'),
-            'status': 'active',
-            'onboarded_at': datetime.utcnow(),
-            'performance_metrics': {
-                'customers_acquired': 0,
-                'revenue_generated': 0,
-                'satisfaction_score': 0
-            }
+            'total_revenue_generated': 0,
+            'total_transactions': 0,
         }
+        return partner_id
 
-        self.partners[partner_id] = partner
+    def log_partner_revenue(self, partner_id: str, revenue: float, transactions: int):
+        if partner_id not in self.partners:
+            raise ValueError(f"Partner {partner_id} not found.")
+        self.partners[partner_id]['total_revenue_generated'] += revenue
+        self.partners[partner_id]['total_transactions'] += transactions
 
-        # Create integration if needed
-        if partner_info.get('requires_integration', False):
-            integration = self._create_integration(partner)
-            self.integrations[partner_id] = integration
-
-        return {
-            'partner_id': partner_id,
-            'status': 'onboarded',
-            'integration_required': partner_info.get('requires_integration', False),
-            'revenue_model': partner['revenue_model'],
-            'next_steps': [
-                'Complete integration setup',
-                'Configure revenue sharing',
-                'Set up partner portal access',
-                'Schedule training session'
-            ]
-        }
-
-    def calculate_partner_revenue(self, partner_id: str, revenue_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Calculate revenue sharing for a partner.
-
-        Args:
-            partner_id: Partner identifier
-            revenue_data: Revenue data from partner activities
-
-        Returns:
-            Dict[str, Any]: Revenue calculation
-        """
+    def calculate_partner_revenue(self, partner_id: str) -> Dict[str, Any]:
         if partner_id not in self.partners:
             return {"error": f"Partner not found: {partner_id}"}
 
         partner = self.partners[partner_id]
         revenue_model = partner['revenue_model']
-
-        if revenue_model not in self.revenue_sharing_models:
-            return {"error": f"Invalid revenue model: {revenue_model}"}
-
         model_config = self.revenue_sharing_models[revenue_model]
 
-        total_revenue = revenue_data.get('total_revenue', 0)
-        transactions = revenue_data.get('transactions', 0)
+        total_revenue = partner['total_revenue_generated']
+        transactions = partner['total_transactions']
 
         if revenue_model == 'per_transaction':
-            partner_share = (transactions * model_config['fixed_fee'] +
-                           total_revenue * model_config['variable_fee'])
-        else:
-            partner_percentage = model_config['partner_percentage']
-            partner_share = total_revenue * partner_percentage
-
-        platform_share = total_revenue - partner_share
+            partner_share = (transactions * model_config['fixed_fee']) + (total_revenue * model_config['variable_fee'])
+        else: # revenue_share
+            partner_share = total_revenue * model_config['partner_percentage']
 
         return {
             'partner_id': partner_id,
             'total_revenue': total_revenue,
             'partner_share': round(partner_share, 2),
-            'platform_share': round(platform_share, 2),
-            'revenue_model': revenue_model,
-            'share_percentage': model_config.get('partner_percentage', 0),
-            'transactions': transactions
+            'platform_share': round(total_revenue - partner_share, 2)
         }
 
-    def _create_integration(self, partner: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Create integration configuration for a partner.
-        """
-        return {
-            'partner_id': partner['id'],
-            'api_endpoints': ['/api/v1/partners/data', '/api/v1/partners/webhook'],
-            'authentication': 'oauth2',
-            'data_format': 'json',
-            'webhook_url': partner.get('webhook_url'),
-            'status': 'pending_setup'
-        }
-
-class AdvancedBusinessManager:
-    """
-    Comprehensive advanced business models management system.
-    """
+class AdvancedBusinessModelManager:
+    """Manages and simulates advanced business models."""
 
     def __init__(self):
         self.subscription_manager = SubscriptionTierManager()
         self.api_manager = APIMonetizationManager()
         self.partner_manager = PartnerEcosystemManager()
 
-    def comprehensive_business_analysis(self, business_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Perform comprehensive business model analysis.
+    def run_comprehensive_simulation(self):
+        """Runs a detailed simulation demonstrating all business models."""
+        print("--- Running Comprehensive Business Simulation ---")
 
-        Args:
-            business_data: Business metrics and requirements
+        # 1. Setup Subscription Tiers for two customers
+        print("\n1. Onboarding customers and logging usage...")
+        self.subscription_manager.add_customer("cust_001", "professional")
+        self.subscription_manager.log_customer_usage("cust_001", {'devices': 40, 'api_calls': 8000, 'storage_gb': 90})
 
-        Returns:
-            Dict[str, Any]: Comprehensive business analysis
-        """
-        analysis = {}
+        self.subscription_manager.add_customer("cust_002", "starter")
+        self.subscription_manager.log_customer_usage("cust_002", {'devices': 10, 'api_calls': 2000, 'storage_gb': 25}) # Overage on all metrics
 
-        # Subscription analysis
-        if 'current_usage' in business_data:
-            usage = business_data['current_usage']
-            current_tier = business_data.get('current_tier', 'starter')
+        # 2. Setup API Monetization for an API user
+        print("\n2. Registering API users and logging calls...")
+        self.api_manager.add_api_user("api_user_1", "developer")
+        self.api_manager.log_api_usage("api_user_1", "analytics_query", 12000) # Overage
 
-            analysis['subscription_analysis'] = {
-                'current_cost': self.subscription_manager.calculate_subscription_cost(
-                    current_tier, usage
-                ),
-                'optimal_tier': self.subscription_manager.recommend_optimal_tier(
-                    usage, business_data.get('budget')
-                )
-            }
+        # 3. Onboard a Partner and log their activity
+        print("\n3. Onboarding partners and logging revenue...")
+        partner_id = self.partner_manager.onboard_partner({
+            "name": "IntegrationCorp",
+            "revenue_model": "revenue_share"
+        })
+        self.partner_manager.log_partner_revenue(partner_id, 1000.0, 50)
 
-        # API monetization analysis
-        if 'api_usage' in business_data:
-            api_usage = business_data['api_usage']
-            current_plan = business_data.get('api_plan', 'free')
-
-            analysis['api_analysis'] = {
-                'current_cost': self.api_manager.calculate_api_cost(api_usage, current_plan),
-                'optimization': self.api_manager.optimize_api_pricing(
-                    pd.DataFrame([api_usage]))  # Mock historical data
-            }
-
-        # Partner ecosystem analysis
-        if 'partner_data' in business_data:
-            partner_data = business_data['partner_data']
-            analysis['partner_analysis'] = {
-                'revenue_sharing': self.partner_manager.calculate_partner_revenue(
-                    partner_data.get('partner_id', 'partner_1'),
-                    partner_data
-                ),
-                'ecosystem_health': self._assess_ecosystem_health()
-            }
-
-        # Overall business recommendations
-        analysis['business_recommendations'] = self._generate_business_recommendations(analysis)
-
-        return analysis
-
-    def _assess_ecosystem_health(self) -> Dict[str, Any]:
-        """
-        Assess the health of the partner ecosystem.
-        """
-        total_partners = len(self.partner_manager.partners)
-        active_partners = sum(1 for p in self.partner_manager.partners.values()
-                            if p['status'] == 'active')
-
-        return {
-            'total_partners': total_partners,
-            'active_partners': active_partners,
-            'activation_rate': active_partners / total_partners if total_partners > 0 else 0,
-            'integrations_completed': len(self.partner_manager.integrations)
+        # 4. Calculate and Report Results
+        print("\n--- Simulation Results ---")
+        results = {
+            "subscription_billing": {
+                "cust_001": self.subscription_manager.calculate_subscription_cost("cust_001"),
+                "cust_002": self.subscription_manager.calculate_subscription_cost("cust_002"),
+            },
+            "tier_recommendations": {
+                "cust_001_optimal": self.subscription_manager.recommend_optimal_tier("cust_001"),
+                "cust_002_optimal": self.subscription_manager.recommend_optimal_tier("cust_002"),
+            },
+            "api_billing": self.api_manager.calculate_api_cost("api_user_1"),
+            "partner_payout": self.partner_manager.calculate_partner_revenue(partner_id),
+            "api_pricing_optimization": self.api_manager.optimize_api_pricing()
         }
 
-    def _generate_business_recommendations(self, analysis: Dict[str, Any]) -> List[str]:
-        """
-        Generate comprehensive business recommendations.
-        """
-        recommendations = []
-
-        # Subscription recommendations
-        if 'subscription_analysis' in analysis:
-            sub_analysis = analysis['subscription_analysis']
-            optimal_tier = sub_analysis['optimal_tier']['recommended_tier']
-            current_tier = sub_analysis['current_cost']['tier']
-
-            if optimal_tier != current_tier:
-                recommendations.append(f"Consider switching from {current_tier} to {optimal_tier} tier")
-
-        # API recommendations
-        if 'api_analysis' in analysis:
-            api_opt = analysis['api_analysis']['optimization']
-            recommendations.extend(api_opt.get('recommendations', []))
-
-        # Partner recommendations
-        if 'partner_analysis' in analysis:
-            ecosystem = analysis['partner_analysis']['ecosystem_health']
-            if ecosystem['activation_rate'] < 0.8:
-                recommendations.append("Focus on improving partner onboarding and activation")
-
-        # General recommendations
-        recommendations.extend([
-            "Implement usage-based pricing for high-volume customers",
-            "Develop partner certification programs",
-            "Create marketplace for third-party integrations",
-            "Establish customer success metrics for each tier"
-        ])
-
-        return recommendations
+        print(json.dumps(results, indent=2))
+        return results
 
 # Example usage
 if __name__ == "__main__":
-    business_manager = AdvancedBusinessManager()
-
-    # Example business data
-    business_data = {
-        'current_usage': {
-            'devices': 25,
-            'api_calls': 5000,
-            'storage_gb': 50
-        },
-        'current_tier': 'starter',
-        'budget': 400,
-        'api_usage': {
-            'data_ingestion': 2000,
-            'analytics_query': 500,
-            'predictive_model': 100
-        },
-        'api_plan': 'developer',
-        'partner_data': {
-            'partner_id': 'partner_1',
-            'total_revenue': 10000,
-            'transactions': 500
-        }
-    }
-
-    # Comprehensive business analysis
-    analysis = business_manager.comprehensive_business_analysis(business_data)
-
-    print("Advanced Business Models Analysis:")
-    print(f"Current Subscription Cost: ${analysis['subscription_analysis']['current_cost']['total_cost']}")
-    print(f"Recommended Tier: {analysis['subscription_analysis']['optimal_tier']['recommended_tier']}")
-    print(f"API Cost: ${analysis['api_analysis']['current_cost']['total_cost']}")
-    print(f"Partner Revenue Share: ${analysis['partner_analysis']['revenue_sharing']['partner_share']}")
-
-    print(f"\nTop Business Recommendations:")
-    for i, rec in enumerate(analysis['business_recommendations'][:5], 1):
-        print(f"{i}. {rec}")
+    business_manager = AdvancedBusinessModelManager()
+    business_manager.run_comprehensive_simulation()
