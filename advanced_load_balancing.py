@@ -14,10 +14,11 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 from enum import Enum
+import logging
 
-from utils.logging_config import get_logger
-
-logger = get_logger(__name__)
+# Configure basic logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
 class LoadBalancingAlgorithm(Enum):
@@ -78,7 +79,7 @@ class AdvancedLoadBalancing:
         # Adaptive algorithm selection
         self.algorithm_performance: Dict[str, Dict] = defaultdict(dict)
 
-        self.logger = get_logger(__name__)
+        self.logger = logging.getLogger(__name__)
         self.logger.info("Advanced Load Balancing initialized")
 
     def _get_default_config(self) -> Dict:
@@ -156,6 +157,74 @@ class AdvancedLoadBalancing:
         except Exception as e:
             self.logger.error(f"Server pool creation failed: {e}")
             return False
+
+    def add_server_to_pool(self, pool_name: str, server_config: Dict) -> bool:
+        """Dynamically add a new server to an existing pool."""
+        if pool_name not in self.server_pools:
+            self.logger.error(f"Cannot add server: Pool '{pool_name}' not found.")
+            return False
+
+        # Basic validation
+        if not all(k in server_config for k in ['id', 'host']):
+            self.logger.error("New server config must include 'id' and 'host'.")
+            return False
+
+        # Check for duplicate ID
+        if any(s['id'] == server_config['id'] for s in self.server_pools[pool_name]):
+            self.logger.warning(f"Server with ID '{server_config['id']}' already exists in pool '{pool_name}'.")
+            return False
+
+        new_server = {
+            "id": server_config["id"], "host": server_config["host"],
+            "port": server_config.get("port", 80), "weight": server_config.get("weight", 1),
+            "max_connections": server_config.get("max_connections", 1000),
+            "current_connections": 0, "response_time": 0.0, "error_rate": 0.0,
+            "health_status": ServerHealth.HEALTHY.value, "last_health_check": None,
+            "failure_count": 0, "location": server_config.get("location", {}),
+            "tags": server_config.get("tags", [])
+        }
+
+        self.server_pools[pool_name].append(new_server)
+        self.server_health[new_server['id']] = {"status": ServerHealth.HEALTHY.value, "last_check": datetime.now()}
+        self.logger.info(f"Successfully added server {new_server['id']} to pool {pool_name}.")
+        return True
+
+    def remove_server_from_pool(self, pool_name: str, server_id: str) -> bool:
+        """Dynamically remove a server from a pool."""
+        if pool_name not in self.server_pools:
+            self.logger.error(f"Cannot remove server: Pool '{pool_name}' not found.")
+            return False
+
+        server_index = -1
+        for i, server in enumerate(self.server_pools[pool_name]):
+            if server['id'] == server_id:
+                server_index = i
+                break
+
+        if server_index == -1:
+            self.logger.warning(f"Server with ID '{server_id}' not found in pool '{pool_name}'.")
+            return False
+
+        # Cleanly remove server and its health data
+        self.server_pools[pool_name].pop(server_index)
+        if server_id in self.server_health:
+            del self.server_health[server_id]
+        if server_id in self.health_check_history:
+            del self.health_check_history[server_id]
+
+        self.logger.info(f"Successfully removed server {server_id} from pool {pool_name}.")
+        return True
+
+    def update_server_weight(self, pool_name: str, server_id: str, new_weight: int) -> bool:
+        """Update the weight of a specific server."""
+        if pool_name not in self.server_pools:
+            return False
+        for server in self.server_pools[pool_name]:
+            if server['id'] == server_id:
+                server['weight'] = max(0, new_weight) # Ensure weight is non-negative
+                self.logger.info(f"Updated weight for server {server_id} to {server['weight']}.")
+                return True
+        return False
 
     def set_load_balancing_algorithm(
         self,
@@ -706,3 +775,66 @@ def get_pool_status(pool_name: str) -> Optional[Dict]:
 def get_load_balancing_metrics() -> Dict[str, Dict]:
     """Get load balancing metrics."""
     return advanced_load_balancing.get_performance_metrics()
+
+
+# --- New Helper Functions for Dynamic Management ---
+
+def add_server(pool_name: str, server_config: Dict) -> bool:
+    """Helper to add a server to a pool."""
+    return advanced_load_balancing.add_server_to_pool(pool_name, server_config)
+
+
+def remove_server(pool_name: str, server_id: str) -> bool:
+    """Helper to remove a server from a pool."""
+    return advanced_load_balancing.remove_server_from_pool(pool_name, server_id)
+
+
+def update_weight(pool_name: str, server_id: str, new_weight: int) -> bool:
+    """Helper to update a server's weight."""
+    return advanced_load_balancing.update_server_weight(pool_name, server_id, new_weight)
+
+async def main_demo():
+    """Demonstrates the advanced load balancing functionalities."""
+    print("--- Advanced Load Balancing Demo ---")
+
+    # 1. Create a server pool
+    pool_name = "web_servers"
+    initial_servers = [
+        {"id": "server-1", "host": "192.168.1.10", "weight": 5},
+        {"id": "server-2", "host": "192.168.1.11", "weight": 10},
+    ]
+    create_server_pool(pool_name, initial_servers)
+    print(f"\n1. Created server pool '{pool_name}'.")
+    print(get_pool_status(pool_name))
+
+    # 2. Get a server using Round Robin
+    print("\n2. Selecting server with Round Robin...")
+    server = await get_load_balanced_server(pool_name)
+    print(f"   - Selected server: {server['id']}")
+    server = await get_load_balanced_server(pool_name)
+    print(f"   - Selected server: {server['id']}")
+
+    # 3. Dynamically add a new server
+    print("\n3. Dynamically adding a new server...")
+    new_server_config = {"id": "server-3", "host": "192.168.1.12", "weight": 8}
+    add_server(pool_name, new_server_config)
+    print(f"   - Added server-3.")
+    print(get_pool_status(pool_name))
+
+    # 4. Update a server's weight
+    print("\n4. Updating server weight...")
+    update_weight(pool_name, "server-1", 20)
+    print(f"   - Updated server-1 weight to 20.")
+    print(get_pool_status(pool_name))
+
+    # 5. Dynamically remove a server
+    print("\n5. Dynamically removing a server...")
+    remove_server(pool_name, "server-2")
+    print(f"   - Removed server-2.")
+    print(get_pool_status(pool_name))
+
+    print("\n--- Demo Complete ---")
+
+
+if __name__ == "__main__":
+    asyncio.run(main_demo())
