@@ -335,6 +335,7 @@ class AdaptiveControlLoops:
 
         self.logger.info("AdaptiveControlLoops initialized")
 
+    @monitor_operation("adaptive_control_loops.create_control_loop")
     @validate_input(
         {
             "loop_id": {
@@ -363,9 +364,6 @@ class AdaptiveControlLoops:
             ValueError: If loop_id is invalid
             InvalidPIDParametersError: If parameters are invalid
         """
-        if not loop_id or not loop_id.strip():
-            raise ValueError("Loop ID cannot be empty")
-
         self._validate_pid_parameters(initial_params)
 
         self.control_loops[loop_id] = initial_params
@@ -378,13 +376,12 @@ class AdaptiveControlLoops:
 
         self.logger.info(f"Created control loop {loop_id} with mode {mode.value}")
 
+    @monitor_operation("adaptive_control_loops.simulate_step")
+    @validate_input({"loop_id": {"type": "string", "required": True, "custom": "loop_exists"}})
     def simulate_step(self, loop_id: str, external_disturbance: float = 0.0) -> ControlPerformance:
         """
         Simulate a single time step of the PID control loop.
         """
-        if loop_id not in self.control_loops:
-            raise ValueError(f"Control loop {loop_id} not found")
-
         params = self.control_loops[loop_id]
         process_variable = self.process_state[loop_id]['y']
 
@@ -446,6 +443,7 @@ class AdaptiveControlLoops:
         return performance
 
     @monitor_operation("adaptive_control_loops.optimize_controller")
+    @validate_input({"loop_id": {"type": "string", "required": True, "custom": "loop_exists"}})
     def optimize_controller(
         self, loop_id: str, process_data: Optional[pd.DataFrame] = None
     ) -> Dict[str, Any]:
@@ -462,9 +460,6 @@ class AdaptiveControlLoops:
         Raises:
             ValueError: If loop_id not found
         """
-        if loop_id not in self.control_loops:
-            raise ValueError(f"Control loop {loop_id} not found")
-
         try:
             current_params = self.control_loops[loop_id]
             optimization_result = {
@@ -507,6 +502,7 @@ class AdaptiveControlLoops:
             raise AdaptiveControlError(f"Failed to optimize controller: {e}") from e
 
     @monitor_operation("adaptive_control_loops.analyze_controller")
+    @validate_input({"loop_id": {"type": "string", "required": True, "custom": "loop_exists"}})
     def analyze_controller(
         self, loop_id: str, analysis_window: int = 3600
     ) -> Dict[str, Any]:
@@ -523,9 +519,6 @@ class AdaptiveControlLoops:
         Raises:
             ValueError: If loop_id not found
         """
-        if loop_id not in self.control_loops:
-            raise ValueError(f"Control loop {loop_id} not found")
-
         try:
             history = self.performance_history.get(loop_id, [])
             if not history:
@@ -789,13 +782,12 @@ class AdaptiveControlLoops:
 
         return improvements
 
+    @monitor_operation("adaptive_control_loops.run_mpc_step")
+    @validate_input({"loop_id": {"type": "string", "required": True, "custom": "loop_exists"}})
     def run_mpc_step(self, loop_id: str, constraints: Dict[str, Any]) -> ControlPerformance:
         """
         Run a single step using the Model Predictive Controller.
         """
-        if loop_id not in self.control_loops:
-            raise ValueError(f"Control loop {loop_id} not found")
-
         current_state = np.array([self.process_state[loop_id]['y'], self.process_state[loop_id]['dy']])
         setpoint = self.control_loops[loop_id].setpoint
 
@@ -831,13 +823,12 @@ class AdaptiveControlLoops:
         self.performance_history[loop_id].append(performance)
         return performance
 
+    @monitor_operation("adaptive_control_loops.run_fuzzy_step")
+    @validate_input({"loop_id": {"type": "string", "required": True, "custom": "loop_exists"}})
     def run_fuzzy_step(self, loop_id: str) -> ControlPerformance:
         """
         Run a single step using the Fuzzy Logic Controller.
         """
-        if loop_id not in self.control_loops:
-            raise ValueError(f"Control loop {loop_id} not found")
-
         params = self.control_loops[loop_id]
         process_variable = self.process_state[loop_id]['y']
         error = params.setpoint - process_variable
@@ -915,6 +906,7 @@ class AdaptiveControlLoops:
         # For now, it's a placeholder
         pass
 
+    @validate_input({"loop_id": {"type": "string", "required": False, "custom": "loop_exists_if_provided"}})
     def get_control_stats(self, loop_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Get statistics for control loop(s).
@@ -926,9 +918,6 @@ class AdaptiveControlLoops:
             Dictionary with control statistics
         """
         if loop_id:
-            if loop_id not in self.control_loops:
-                raise ValueError(f"Control loop {loop_id} not found")
-
             params = self.control_loops[loop_id]
             history = self.performance_history.get(loop_id, [])
 
@@ -1202,7 +1191,9 @@ if __name__ == "__main__":
         print("\n--- 6. Multi-Loop Coordination ---")
         controller.multi_loop_coordinator.add_interaction("temp_loop_1", "pressure_loop_2", "heat_exchange", 0.5)
         coordinated_actions = controller.coordinate_loops()
-        print(f"Coordinated actions: {coordinated_actions}")
+        # Format the output for better readability
+        formatted_actions = {k: f"{v:.2f}" for k, v in coordinated_actions.items()}
+        print(f"Coordinated actions: {formatted_actions}")
 
         # 7. ML Integration (RL & AutoML)
         print("\n--- 7. ML-driven Adaptive Cycle ---")
@@ -1210,7 +1201,8 @@ if __name__ == "__main__":
         if adaptive_results.get("rl_optimization"):
             print(f"RL Optimized Params: {adaptive_results['rl_optimization']}")
         if adaptive_results.get("automl_prediction"):
-            print(f"AutoML Predicted Performance (avg error): {adaptive_results['automl_prediction']['predictions']:.3f}")
+            prediction = adaptive_results['automl_prediction']['predictions']
+            print(f"AutoML Predicted Performance Metric: {prediction:.3f}")
         print(f"Recommendations: {adaptive_results['combined_recommendations']}")
 
         # 8. Final Analysis
