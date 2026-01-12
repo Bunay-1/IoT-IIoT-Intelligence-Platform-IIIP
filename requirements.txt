@@ -2,3 +2,5 @@ cryptography
 plotly
 pandas
 scikit-learn
+matplotlib
+seaborn
