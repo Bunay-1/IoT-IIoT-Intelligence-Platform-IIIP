@@ -8,7 +8,7 @@ real-time parameter adjustment based on process feedback.
 
 import asyncio
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -16,21 +16,36 @@ import numpy as np
 import pandas as pd
 
 from config import settings
-from utils.logging_config import LoggerMixin
+from utils.logging_config import get_logger
 from utils.performance_monitor import monitor_operation
 from utils.security import SecurityError, input_validator, validate_input
 
 # Import core ML engines for integration
-try:
-    from automl_engine import automl_engine
-    from reinforcement_learning import rl_engine
+# --- Mock ML Engines for demonstration purposes ---
+class MockRLEngine:
+    def optimize_parameters(self, params):
+        # Simulate slight adjustments
+        return {
+            'kp': params.get('kp', 1.0) * np.random.uniform(0.9, 1.1),
+            'ki': params.get('ki', 0.1) * np.random.uniform(0.8, 1.2),
+            'kd': params.get('kd', 0.05) * np.random.uniform(0.95, 1.05),
+        }
+rl_engine = MockRLEngine()
 
-    AUTOML_AVAILABLE = True
-    RL_AVAILABLE = True
-except ImportError:
-    AUTOML_AVAILABLE = False
-    RL_AVAILABLE = False
-    # Logger will be available after class definition
+class MockAutoMLEngine:
+    def __init__(self):
+        self.best_model = True
+        self.best_model_name = "Mocked_LSTM_Model"
+    def predict(self, data):
+        # Simulate predicting future performance based on past errors
+        if 'error' in data.columns:
+            return data['error'].mean() * np.random.uniform(0.8, 1.2)
+        return np.random.rand()
+automl_engine = MockAutoMLEngine()
+
+AUTOML_AVAILABLE = True
+RL_AVAILABLE = True
+# --- End Mock ML Engines ---
 
 
 class ControlMode(Enum):
@@ -40,6 +55,8 @@ class ControlMode(Enum):
     AUTOMATIC = "automatic"
     CASCADE = "cascade"
     ADAPTIVE = "adaptive"
+    MPC = "mpc"
+    FUZZY = "fuzzy"
 
 
 @dataclass
@@ -113,6 +130,7 @@ class AdvancedTuningEngine:
             individual['fitness'] = np.random.random()  # Replace with actual evaluation
 
         best = max(population, key=lambda x: x['fitness'])
+        del best['fitness']
         return PIDParameters(**best)
 
     def particle_swarm_tuning(self, loop_id: str, bounds: Dict[str, Tuple[float, float]],
@@ -149,7 +167,10 @@ class AdvancedTuningEngine:
                     global_best_fitness = fitness
                     global_best = particle['position'].copy()
 
-        return PIDParameters(**global_best)
+        if global_best:
+            return PIDParameters(**global_best)
+        else: # Fallback in case no best is found
+            return PIDParameters(kp=bounds['kp'][0], ki=bounds['ki'][0], kd=bounds['kd'][0])
 
 
 class PredictiveController:
@@ -210,7 +231,54 @@ class MultiLoopCoordinator:
         return coordinated_actions
 
 
-class AdaptiveControlLoops(LoggerMixin):
+class FuzzyLogicController:
+    """A simple fuzzy logic controller."""
+
+    def __init__(self):
+        # Simplified fuzzy sets for error and delta_error
+        # Negative (N), Zero (Z), Positive (P)
+        pass
+
+    def _fuzzify(self, value: float, ranges: Dict[str, Tuple[float, float]]) -> Dict[str, float]:
+        """Convert a crisp value into fuzzy membership values."""
+        memberships = {}
+        for set_name, (start, end) in ranges.items():
+            if start <= value < end:
+                memberships[set_name] = 1.0
+            else:
+                memberships[set_name] = 0.0
+        return memberships
+
+    def _apply_rules(self, error_fuzzy: Dict[str, float], delta_error_fuzzy: Dict[str, float]) -> str:
+        """Apply fuzzy rules to determine output."""
+        # This is a highly simplified rule base
+        if error_fuzzy.get('P', 0) > 0.5:
+            return 'increase'
+        elif error_fuzzy.get('N', 0) > 0.5:
+            return 'decrease'
+        else:
+            return 'hold'
+
+    def _defuzzify(self, fuzzy_output: str, actions: Dict[str, float]) -> float:
+        """Convert fuzzy output to a crisp control action."""
+        return actions.get(fuzzy_output, 0.0)
+
+    def compute_action(self, error: float, delta_error: float) -> float:
+        """Compute the control action using fuzzy logic."""
+        error_ranges = {'N': (-100, -0.1), 'Z': (-0.1, 0.1), 'P': (0.1, 100)}
+        delta_error_ranges = {'N': (-10, -0.05), 'Z': (-0.05, 0.05), 'P': (0.05, 10)}
+        output_actions = {'decrease': -10.0, 'hold': 0.0, 'increase': 10.0}
+
+        error_fuzzy = self._fuzzify(error, error_ranges)
+        delta_error_fuzzy = self._fuzzify(delta_error, delta_error_ranges)
+
+        fuzzy_output = self._apply_rules(error_fuzzy, delta_error_fuzzy)
+        crisp_output = self._defuzzify(fuzzy_output, output_actions)
+
+        return crisp_output
+
+
+class AdaptiveControlLoops:
     """
     Advanced adaptive control system with real-time PID optimization, MPC, and multi-loop coordination.
 
@@ -227,17 +295,24 @@ class AdaptiveControlLoops(LoggerMixin):
             config: Optional configuration dictionary
         """
         self.config = config or {}
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+
+        # Advanced Controllers
+        self.tuning_engine = AdvancedTuningEngine()
+        self.predictive_controller = PredictiveController()
+        self.multi_loop_coordinator = MultiLoopCoordinator()
+        self.fuzzy_controller = FuzzyLogicController()
 
         # Control loops registry
         self.control_loops: Dict[str, PIDParameters] = {}
         self.performance_history: Dict[str, List[ControlPerformance]] = {}
-        self.process_state: Dict[str, float] = {} # Tracks the current process variable for each loop
+        self.process_state: Dict[str, Dict[str, Any]] = {} # Tracks state for a more complex process model
 
         # Adaptive tuning settings
         self.adaptation_enabled = self.config.get("adaptation_enabled", True)
         self.tuning_method = self.config.get(
             "tuning_method", "ziegler_nichols"
-        )  # 'ziegler_nichols', 'cohen_coon', 'relay'
+        )  # 'ziegler_nichols', 'cohen_coon', 'relay', 'genetic_algorithm', 'particle_swarm'
         self.adaptation_interval = self.config.get(
             "adaptation_interval", 300
         )  # seconds
@@ -295,7 +370,11 @@ class AdaptiveControlLoops(LoggerMixin):
 
         self.control_loops[loop_id] = initial_params
         self.performance_history[loop_id] = []
-        self.process_state[loop_id] = initial_params.setpoint # Start at setpoint
+        self.process_state[loop_id] = {
+            'y': initial_params.setpoint, # Process variable
+            'dy': 0.0,                    # First derivative
+            'u_delayed': [0.0] * 5        # Delay buffer for control action
+        }
 
         self.logger.info(f"Created control loop {loop_id} with mode {mode.value}")
 
@@ -307,7 +386,7 @@ class AdaptiveControlLoops(LoggerMixin):
             raise ValueError(f"Control loop {loop_id} not found")
 
         params = self.control_loops[loop_id]
-        process_variable = self.process_state[loop_id]
+        process_variable = self.process_state[loop_id]['y']
 
         # Calculate errors
         error = params.setpoint - process_variable
@@ -323,12 +402,30 @@ class AdaptiveControlLoops(LoggerMixin):
         output = (params.kp * error) + (params.ki * integral_error) + (params.kd * derivative_error)
         output = max(params.output_limits[0], min(params.output_limits[1], output))
 
-        # --- Simulate Process Reaction ---
-        # A simple first-order system simulation: new_pv = old_pv * decay + output * gain + disturbance
-        process_gain = 0.85
-        time_constant = 0.95
-        new_process_variable = (process_variable * time_constant) + (output * process_gain) + external_disturbance
-        self.process_state[loop_id] = new_process_variable
+        # --- Simulate Second-Order System with Delay ---
+        # y'' + 2*zeta*omega*y' + omega^2*y = K*omega^2*u(t-theta)
+        K = 1.2 # Gain
+        zeta = 0.8 # Damping ratio
+        omega = 0.5 # Natural frequency
+
+        # Update delay buffer
+        u_delayed_buffer = self.process_state[loop_id]['u_delayed']
+        u_delayed_buffer.append(output)
+        delayed_output = u_delayed_buffer.pop(0)
+
+        y = self.process_state[loop_id]['y']
+        dy = self.process_state[loop_id]['dy']
+
+        d2y = (K * omega**2 * delayed_output) - (2 * zeta * omega * dy) - (omega**2 * y)
+
+        # Integrate to get new state
+        dt = 1.0 # Time step
+        new_dy = dy + d2y * dt
+        new_y = y + new_dy * dt + external_disturbance
+
+        self.process_state[loop_id]['y'] = new_y
+        self.process_state[loop_id]['dy'] = new_dy
+        new_process_variable = new_y
 
         # Store for next iteration
         setattr(self, f"_integral_{loop_id}", integral_error)
@@ -336,7 +433,7 @@ class AdaptiveControlLoops(LoggerMixin):
 
         # Create and store performance record
         performance = ControlPerformance(
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             setpoint=params.setpoint,
             process_variable=new_process_variable,
             control_output=output,
@@ -374,15 +471,20 @@ class AdaptiveControlLoops(LoggerMixin):
                 "loop_id": loop_id,
                 "original_parameters": asdict(current_params),
                 "optimization_method": self.tuning_method,
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now(timezone.utc),
             }
 
+            bounds = {'kp': (0.1, 10.0), 'ki': (0.01, 5.0), 'kd': (0.0, 2.0)} # Example bounds
             if self.tuning_method == "ziegler_nichols":
                 optimized_params = self._ziegler_nichols_tuning(loop_id, process_data)
             elif self.tuning_method == "cohen_coon":
                 optimized_params = self._cohen_coon_tuning(loop_id, process_data)
             elif self.tuning_method == "relay":
                 optimized_params = self._relay_tuning(loop_id, process_data)
+            elif self.tuning_method == "genetic_algorithm":
+                optimized_params = self.tuning_engine.genetic_algorithm_tuning(loop_id, bounds)
+            elif self.tuning_method == "particle_swarm":
+                optimized_params = self.tuning_engine.particle_swarm_tuning(loop_id, bounds)
             else:
                 # Default to Ziegler-Nichols
                 optimized_params = self._ziegler_nichols_tuning(loop_id, process_data)
@@ -434,7 +536,7 @@ class AdaptiveControlLoops(LoggerMixin):
                 }
 
             # Filter recent data
-            cutoff_time = datetime.now() - timedelta(seconds=analysis_window)
+            cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=analysis_window)
             recent_data = [p for p in history if p.timestamp > cutoff_time]
 
             if not recent_data:
@@ -687,6 +789,116 @@ class AdaptiveControlLoops(LoggerMixin):
 
         return improvements
 
+    def run_mpc_step(self, loop_id: str, constraints: Dict[str, Any]) -> ControlPerformance:
+        """
+        Run a single step using the Model Predictive Controller.
+        """
+        if loop_id not in self.control_loops:
+            raise ValueError(f"Control loop {loop_id} not found")
+
+        current_state = np.array([self.process_state[loop_id]['y'], self.process_state[loop_id]['dy']])
+        setpoint = self.control_loops[loop_id].setpoint
+
+        control_sequence = self.predictive_controller.optimize_control_sequence(current_state, setpoint, constraints)
+        control_action = control_sequence[0] # Apply the first action in the sequence
+
+        # Using the same second-order system for reaction
+        K, zeta, omega, dt = 1.2, 0.8, 0.5, 1.0
+        u_delayed_buffer = self.process_state[loop_id]['u_delayed']
+        u_delayed_buffer.append(control_action)
+        delayed_output = u_delayed_buffer.pop(0)
+
+        y = self.process_state[loop_id]['y']
+        dy = self.process_state[loop_id]['dy']
+        d2y = (K * omega**2 * delayed_output) - (2 * zeta * omega * dy) - (omega**2 * y)
+
+        new_dy = dy + d2y * dt
+        new_y = y + new_dy * dt
+
+        self.process_state[loop_id]['y'] = new_y
+        self.process_state[loop_id]['dy'] = new_dy
+        new_process_variable = new_y
+
+        performance = ControlPerformance(
+            timestamp=datetime.now(timezone.utc),
+            setpoint=setpoint,
+            process_variable=new_process_variable,
+            control_output=control_action,
+            error=setpoint - new_process_variable,
+            integral_error=0, # Not applicable for this simple MPC
+            derivative_error=0, # Not applicable
+        )
+        self.performance_history[loop_id].append(performance)
+        return performance
+
+    def run_fuzzy_step(self, loop_id: str) -> ControlPerformance:
+        """
+        Run a single step using the Fuzzy Logic Controller.
+        """
+        if loop_id not in self.control_loops:
+            raise ValueError(f"Control loop {loop_id} not found")
+
+        params = self.control_loops[loop_id]
+        process_variable = self.process_state[loop_id]['y']
+        error = params.setpoint - process_variable
+        delta_error = error - getattr(self, f"_prev_error_{loop_id}", 0)
+
+        control_action = self.fuzzy_controller.compute_action(error, delta_error)
+
+        # Using the same second-order system for reaction
+        K, zeta, omega, dt = 1.2, 0.8, 0.5, 1.0
+        u_delayed_buffer = self.process_state[loop_id]['u_delayed']
+        u_delayed_buffer.append(control_action)
+        delayed_output = u_delayed_buffer.pop(0)
+
+        y = self.process_state[loop_id]['y']
+        dy = self.process_state[loop_id]['dy']
+        d2y = (K * omega**2 * delayed_output) - (2 * zeta * omega * dy) - (omega**2 * y)
+
+        new_dy = dy + d2y * dt
+        new_y = y + new_dy * dt
+
+        self.process_state[loop_id]['y'] = new_y
+        self.process_state[loop_id]['dy'] = new_dy
+        new_process_variable = new_y
+        setattr(self, f"_prev_error_{loop_id}", error)
+
+        performance = ControlPerformance(
+            timestamp=datetime.now(timezone.utc),
+            setpoint=params.setpoint,
+            process_variable=new_process_variable,
+            control_output=control_action,
+            error=error,
+            integral_error=0, # Not applicable
+            derivative_error=delta_error,
+        )
+        self.performance_history[loop_id].append(performance)
+        return performance
+
+    def coordinate_loops(self) -> Dict[str, float]:
+        """
+        Run one coordination cycle for all interacting loops.
+        """
+        loop_states = {}
+        for loop_id in self.control_loops.keys():
+             # In a real system, you'd get the base action from the PID/MPC output
+            state = self.process_state.get(loop_id, {'y': 0})
+            loop_states[loop_id] = {'base_action': state['y']}
+
+        coordinated_actions = self.multi_loop_coordinator.coordinate_control(loop_states)
+        self.logger.info(f"Coordinated actions calculated: {coordinated_actions}")
+        return coordinated_actions
+
+    def generate_disturbance(self, disturbance_type: str = 'white_noise', amplitude: float = 0.1) -> float:
+        """Generates different types of process disturbances."""
+        if disturbance_type == 'white_noise':
+            return np.random.normal(0, amplitude)
+        elif disturbance_type == 'step':
+            return amplitude if np.random.random() < 0.05 else 0.0 # Occasional step
+        elif disturbance_type == 'sine':
+            return amplitude * np.sin(datetime.now(timezone.utc).timestamp() / 10.0)
+        return 0.0
+
     def _detect_setpoint_changes(
         self, setpoints: List[float], threshold: float = 0.01
     ) -> List[int]:
@@ -812,7 +1024,7 @@ class AdaptiveControlLoops(LoggerMixin):
                 if hasattr(predictions, "tolist")
                 else predictions,
                 "model_used": automl_engine.best_model_name,
-                "prediction_timestamp": datetime.now(),
+                "prediction_timestamp": datetime.now(timezone.utc),
                 "data_shape": future_data.shape,
             }
 
@@ -840,7 +1052,7 @@ class AdaptiveControlLoops(LoggerMixin):
 
         results = {
             "loop_id": loop_id,
-            "timestamp": datetime.now(),
+            "timestamp": datetime.now(timezone.utc),
             "rl_optimization": None,
             "automl_prediction": None,
             "combined_recommendations": [],
@@ -941,3 +1153,70 @@ class AdaptiveControlLoops(LoggerMixin):
             )
 
         return recommendations
+
+if __name__ == "__main__":
+    async def main():
+        print("--- Adaptive Control Loops Demonstration ---")
+
+        controller = AdaptiveControlLoops()
+
+        # 1. Create Control Loops
+        print("\n--- 1. Creating Control Loops ---")
+        pid_params1 = PIDParameters(kp=2.5, ki=1.0, kd=0.5, setpoint=100.0)
+        controller.create_control_loop("temp_loop_1", pid_params1)
+
+        pid_params2 = PIDParameters(kp=3.0, ki=1.2, kd=0.6, setpoint=50.0)
+        controller.create_control_loop("pressure_loop_2", pid_params2)
+        print(f"Created loops: {list(controller.control_loops.keys())}")
+
+        # 2. Simulate PID Control
+        print("\n--- 2. Simulating PID Control ---")
+        for i in range(20):
+            disturbance = controller.generate_disturbance('white_noise', 0.5)
+            perf = controller.simulate_step("temp_loop_1", disturbance)
+            if i % 5 == 0:
+                print(f"Step {i}: PV={perf.process_variable:.2f}, Output={perf.control_output:.2f}, Error={perf.error:.2f}")
+
+        # 3. Advanced Tuning Demonstration
+        print("\n--- 3. Advanced Tuning (Genetic Algorithm) ---")
+        controller.tuning_method = "genetic_algorithm"
+        optimization_result = controller.optimize_controller("temp_loop_1")
+        print(f"Optimized parameters: {optimization_result['optimized_parameters']}")
+
+        # 4. Fuzzy Logic Control Demonstration
+        print("\n--- 4. Fuzzy Logic Control ---")
+        # Reset state for fuzzy demo
+        controller.process_state["temp_loop_1"]['y'] = 95.0
+        for i in range(10):
+            perf = controller.run_fuzzy_step("temp_loop_1")
+            print(f"Fuzzy Step {i}: PV={perf.process_variable:.2f}, Output={perf.control_output:.2f}")
+
+        # 5. Model Predictive Control (MPC) Demonstration
+        print("\n--- 5. Model Predictive Control (MPC) ---")
+        controller.process_state["temp_loop_1"]['y'] = 110.0 # Start away from setpoint
+        for i in range(10):
+            perf = controller.run_mpc_step("temp_loop_1", constraints={'max_output': 50})
+            print(f"MPC Step {i}: PV={perf.process_variable:.2f}, Output={perf.control_output:.2f}")
+
+        # 6. Multi-Loop Coordination
+        print("\n--- 6. Multi-Loop Coordination ---")
+        controller.multi_loop_coordinator.add_interaction("temp_loop_1", "pressure_loop_2", "heat_exchange", 0.5)
+        coordinated_actions = controller.coordinate_loops()
+        print(f"Coordinated actions: {coordinated_actions}")
+
+        # 7. ML Integration (RL & AutoML)
+        print("\n--- 7. ML-driven Adaptive Cycle ---")
+        adaptive_results = await controller.adaptive_optimization_cycle("temp_loop_1")
+        if adaptive_results.get("rl_optimization"):
+            print(f"RL Optimized Params: {adaptive_results['rl_optimization']}")
+        if adaptive_results.get("automl_prediction"):
+            print(f"AutoML Predicted Performance (avg error): {adaptive_results['automl_prediction']['predictions']:.3f}")
+        print(f"Recommendations: {adaptive_results['combined_recommendations']}")
+
+        # 8. Final Analysis
+        print("\n--- 8. Final Controller Analysis ---")
+        analysis = controller.analyze_controller("temp_loop_1")
+        print(f"Stability: {analysis['stability_analysis']['status'] if 'status' in analysis['stability_analysis'] else analysis['stability_analysis']['is_stable']}")
+        print(f"RMSE: {analysis['performance_metrics']['rmse']:.3f}")
+
+    asyncio.run(main())
