@@ -1,212 +1,229 @@
 """
-AI Build Prompt Aggregation and Routing Module
+AI Agent Orchestration and Prompt Engineering Module
 
-This module implements an intelligent, stateful router for aggregating, processing,
-and routing AI prompts to a dynamic registry of language models based on various
-strategies like cost, latency, and capability.
+This module implements an intelligent system for routing user requests to a
+registry of specialized "Expert Agents". It analyzes user intent, dynamically
+constructs tailored prompts, and can orchestrate multi-agent "chains of thought"
+to resolve complex tasks.
 """
-
 import asyncio
-import time
 import random
-from typing import Any, Dict, List, Optional, Literal
+import time
+from typing import Any, Dict, List, Optional, Type
 from collections import defaultdict
-import aiohttp
-import logging
+import re
 
-# Basic logging configuration
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from utils.logging_config import get_logger
 
-RoutingStrategy = Literal["best_capability", "lowest_cost", "lowest_latency", "balanced"]
+logger = get_logger(__name__)
 
-class PromptRouter:
+# --- Base Expert Agent Definition ---
+
+class ExpertAgent:
     """
-    An intelligent, stateful router for AI prompts.
+    Base class for a specialized AI agent. Each agent encapsulates its
+    capabilities, prompt templates, and the LLM model it uses.
     """
-    def __init__(self):
-        # Registry of available AI models with their metadata
-        self.model_registry: Dict[str, Dict] = {}
-        # Performance metrics tracked per model
-        self.performance_metrics: Dict[str, Dict] = defaultdict(lambda: {"total_cost": 0.0, "avg_latency_ms": 0.0, "requests": 0})
-        # History of routing decisions
-        self.routing_history: List[Dict] = []
+    def __init__(self, model_id: str, cost_per_1k_tokens: float, base_latency_ms: int):
+        self.model_id = model_id
+        self.cost_per_1k_tokens = cost_per_1k_tokens
+        self.base_latency_ms = base_latency_ms
+        self.performance_metrics = {"total_cost": 0.0, "avg_latency_ms": 0.0, "requests": 0}
 
-        # Initialize with some default models
-        self._register_default_models()
+    def get_capabilities(self) -> List[str]:
+        """Returns a list of keywords defining the agent's expertise."""
+        raise NotImplementedError
 
-    def _register_default_models(self):
-        """Registers a predefined set of AI models."""
-        self.register_model(
-            model_id="claude-3-opus",
-            capabilities=["complex_reasoning", "text_generation", "code_generation", "summarization"],
-            cost_per_1k_tokens=0.015,
-            base_latency_ms=800
-        )
-        self.register_model(
-            model_id="gpt-4-turbo",
-            capabilities=["text_generation", "code_generation", "json_output"],
-            cost_per_1k_tokens=0.010,
-            base_latency_ms=500
-        )
-        self.register_model(
-            model_id="gemini-1.5-pro",
-            capabilities=["multi_modal", "text_generation", "summarization"],
-            cost_per_1k_tokens=0.007,
-            base_latency_ms=650
-        )
-        self.register_model(
-            model_id="llama-3-8b",
-            capabilities=["text_generation", "fast_response"],
-            cost_per_1k_tokens=0.0002,
-            base_latency_ms=150
-        )
+    def construct_prompt(self, user_query: str, context: Optional[Dict] = None) -> str:
+        """Constructs a tailored, high-quality prompt for the LLM."""
+        return user_query # Default behavior is to pass the query directly
 
-    def register_model(self, model_id: str, capabilities: List[str], cost_per_1k_tokens: float, base_latency_ms: int):
-        """Adds a new AI model to the router's registry."""
-        self.model_registry[model_id] = {
-            "capabilities": set(capabilities),
-            "cost_per_1k_tokens": cost_per_1k_tokens,
-            "base_latency_ms": base_latency_ms
-        }
-        logger.info(f"Registered model: {model_id}")
+    async def execute(self, user_query: str, context: Optional[Dict] = None) -> Dict:
+        """Simulates executing the prompt against the agent's model."""
+        full_prompt = self.construct_prompt(user_query, context)
 
-    def _select_model(self, required_capability: str, strategy: RoutingStrategy) -> Optional[str]:
-        """Selects the best model based on the required capability and routing strategy."""
-        candidate_models = [m_id for m_id, m_data in self.model_registry.items() if required_capability in m_data["capabilities"]]
-
-        if not candidate_models:
-            return None
-
-        if strategy == "lowest_cost":
-            return min(candidate_models, key=lambda m_id: self.model_registry[m_id]["cost_per_1k_tokens"])
-
-        if strategy == "lowest_latency":
-            return min(candidate_models, key=lambda m_id: self.model_registry[m_id]["base_latency_ms"])
-
-        # "best_capability" or "balanced" can have more complex logic; for now, we'll use a simple heuristic
-        # A more advanced version might score models based on capability "strength"
-        return sorted(candidate_models, key=lambda m_id: self.model_registry[m_id]["cost_per_1k_tokens"], reverse=True)[0]
-
-    async def _mock_model_call(self, model_id: str, prompt: str) -> Dict:
-        """Simulates an API call to a language model."""
-        model_data = self.model_registry[model_id]
-        latency_ms = model_data["base_latency_ms"] + random.uniform(-50, 100)
+        # Simulate API call latency and cost
+        latency_ms = self.base_latency_ms + random.uniform(-50, 100)
         await asyncio.sleep(latency_ms / 1000.0)
 
-        response_tokens = len(prompt.split()) * 1.5 # Simulate a response length
-        cost = (len(prompt.split()) + response_tokens) / 1000 * model_data["cost_per_1k_tokens"]
+        response_tokens = len(full_prompt.split()) * 1.5 # Simulate a response length
+        cost = (len(full_prompt.split()) + response_tokens) / 1000 * self.cost_per_1k_tokens
+
+        # Update metrics
+        total_reqs = self.performance_metrics['requests'] + 1
+        self.performance_metrics['total_cost'] += cost
+        self.performance_metrics['avg_latency_ms'] = ((self.performance_metrics['avg_latency_ms'] * (total_reqs - 1)) + latency_ms) / total_reqs
+        self.performance_metrics['requests'] = total_reqs
 
         return {
-            "response": f"Mock response from {model_id} for prompt: '{prompt[:30]}...'",
+            "response": f"Response from {self.model_id} ({self.__class__.__name__}): Processed query for '{user_query[:30]}...'",
             "cost": cost,
-            "latency_ms": latency_ms
+            "latency_ms": latency_ms,
+            "agent_used": self.__class__.__name__
         }
 
-    def _update_metrics(self, model_id: str, cost: float, latency_ms: float):
-        """Updates the performance metrics for a given model."""
-        metrics = self.performance_metrics[model_id]
-        total_requests = metrics["requests"] + 1
-        metrics["total_cost"] += cost
-        # Update average latency using a moving average
-        metrics["avg_latency_ms"] = ((metrics["avg_latency_ms"] * metrics["requests"]) + latency_ms) / total_requests
-        metrics["requests"] = total_requests
+# --- Concrete Agent Implementations ---
 
-    async def route_prompt(self, prompt: str, required_capability: str, strategy: RoutingStrategy) -> Dict:
-        """Routes a single prompt to the best model and returns its response."""
-        start_time = time.time()
-        model_id = self._select_model(required_capability, strategy)
+class CodeGeneratorAgent(ExpertAgent):
+    """Specialized in generating high-quality code."""
+    def get_capabilities(self) -> List[str]:
+        return ['code', 'python', 'javascript', 'function', 'class', 'script', 'algorithm']
 
-        if not model_id:
-            return {"error": f"No model found with capability: {required_capability}"}
-
-        result = await self._mock_model_call(model_id, prompt)
-
-        self._update_metrics(model_id, result["cost"], result["latency_ms"])
-
-        decision = {
-            "prompt": prompt,
-            "strategy": strategy,
-            "selected_model": model_id,
-            "result": result,
-            "timestamp": time.time()
-        }
-        self.routing_history.append(decision)
-
-        return decision
-
-    async def route_and_aggregate(self, prompts: List[Dict], final_aggregator_strategy: RoutingStrategy) -> Dict:
-        """
-        Routes multiple prompts in parallel, then aggregates their responses into a final summary.
-        Example prompt: {"prompt": "Summarize this text...", "capability": "summarization", "strategy": "lowest_cost"}
-        """
-        tasks = [self.route_prompt(p["prompt"], p["capability"], p["strategy"]) for p in prompts]
-        results = await asyncio.gather(*tasks)
-
-        # Filter out errors and collect responses
-        successful_responses = [r['result']['response'] for r in results if 'error' not in r]
-
-        if not successful_responses:
-            return {"error": "All sub-prompts failed.", "details": results}
-
-        # Aggregate the responses using another model call
-        aggregation_prompt = "Synthesize the following pieces of information into a single, coherent answer: \n\n" + "\n\n".join(successful_responses)
-
-        final_decision = await self.route_prompt(
-            prompt=aggregation_prompt,
-            required_capability="complex_reasoning", # Use a powerful model for aggregation
-            strategy=final_aggregator_strategy
+    def construct_prompt(self, user_query: str, context: Optional[Dict] = None) -> str:
+        return (
+            "You are a senior software engineer. Your task is to provide a robust, well-documented code solution.\n"
+            f"User request: '{user_query}'\n"
+            "Please provide the code within a markdown block and include a brief explanation."
         )
 
-        return {
-            "final_response": final_decision,
-            "intermediate_results": results
+class DataAnalysisAgent(ExpertAgent):
+    """Specialized in data analysis, summarization, and extraction."""
+    def get_capabilities(self) -> List[str]:
+        return ['analyze', 'summarize', 'data', 'extract', 'sentiment', 'report']
+
+    def construct_prompt(self, user_query: str, context: Optional[Dict] = None) -> str:
+        prompt = (
+            "As a data scientist, your task is to analyze the provided information.\n"
+            f"User request: '{user_query}'\n"
+        )
+        if context and 'data' in context:
+            prompt += f"Dataset to analyze: \n---\n{context['data']}\n---"
+        return prompt
+
+class CreativeWriterAgent(ExpertAgent):
+    """Specialized in creative writing tasks."""
+    def get_capabilities(self) -> List[str]:
+        return ['write', 'poem', 'story', 'marketing', 'slogan', 'creative']
+
+    def construct_prompt(self, user_query: str, context: Optional[Dict] = None) -> str:
+        style = context.get('style', 'a professional and engaging') if context else 'a professional and engaging'
+        return (
+            f"You are a creative writer. Adopt {style} tone.\n"
+            f"Task: '{user_query}'"
+        )
+
+# --- Intelligent Router and Orchestrator ---
+
+class PromptOrchestrator:
+    """
+    Analyzes user queries, routes them to the appropriate ExpertAgent,
+    and can orchestrate multi-agent chains for complex tasks.
+    """
+    def __init__(self):
+        self.agents: Dict[str, ExpertAgent] = {}
+        self._register_default_agents()
+
+    def _register_default_agents(self):
+        self.register_agent(CodeGeneratorAgent("gpt-4-turbo", 0.010, 500))
+        self.register_agent(DataAnalysisAgent("claude-3-opus", 0.015, 800))
+        self.register_agent(CreativeWriterAgent("gemini-1.5-pro", 0.007, 650))
+
+    def register_agent(self, agent_instance: ExpertAgent):
+        """Adds a new agent to the orchestrator's registry."""
+        self.agents[agent_instance.__class__.__name__] = agent_instance
+        logger.info(f"Registered agent: {agent_instance.__class__.__name__}")
+
+    def _route_to_agent(self, user_query: str) -> ExpertAgent:
+        """
+        Analyzes the user query to select the most appropriate agent.
+        Uses a simple keyword-based classification.
+        """
+        scores: Dict[str, int] = defaultdict(int)
+        query_lower = user_query.lower()
+
+        for name, agent in self.agents.items():
+            for keyword in agent.get_capabilities():
+                if re.search(r'\b' + keyword + r'\b', query_lower):
+                    scores[name] += 1
+
+        if not scores:
+            logger.warning("No specific agent matched, falling back to the most capable generalist.")
+            # Fallback to the most expensive model, assuming it's the most capable.
+            return max(self.agents.values(), key=lambda a: a.cost_per_1k_tokens)
+
+        best_agent_name = max(scores, key=scores.get)
+        logger.info(f"Routing query to: {best_agent_name} (Score: {scores[best_agent_name]})")
+        return self.agents[best_agent_name]
+
+    async def handle_simple_request(self, user_query: str) -> Dict:
+        """Handles a single, straightforward request."""
+        agent = self._route_to_agent(user_query)
+        result = await agent.execute(user_query)
+        return result
+
+    async def execute_complex_chain(self, initial_query: str, chain: List[Dict]) -> Dict:
+        """
+        Executes a multi-step "chain of thought" where the output of one
+        agent becomes the input for the next.
+
+        Example chain step: {'agent': 'DataAnalysisAgent', 'task': 'First, summarize the key points.'}
+        """
+        logger.info(f"Executing complex chain for query: '{initial_query}'")
+
+        current_context = {"data": initial_query}
+        intermediate_results = []
+
+        for step in chain:
+            agent_name = step.get("agent")
+            task_instruction = step.get("task")
+
+            if not agent_name or agent_name not in self.agents:
+                return {"error": f"Agent '{agent_name}' not found in registry."}
+
+            agent = self.agents[agent_name]
+            logger.info(f"Chain step: Executing '{task_instruction}' with {agent_name}")
+
+            result = await agent.execute(task_instruction, current_context)
+            intermediate_results.append(result)
+
+            # The output of this step becomes the input 'data' for the next
+            current_context['data'] = result['response']
+
+        final_result = {
+            "final_response": current_context['data'],
+            "intermediate_steps": intermediate_results
         }
+        return final_result
 
     def get_performance_dashboard(self) -> Dict:
-        """Returns a summary of performance metrics for all models."""
-        return {model_id: {
-            "total_cost": round(data["total_cost"], 4),
-            "avg_latency_ms": round(data["avg_latency_ms"]),
-            "requests": data["requests"]
-        } for model_id, data in self.performance_metrics.items()}
+        """Returns performance metrics for all registered agents."""
+        return {name: {
+            "model_id": agent.model_id,
+            "total_cost": round(agent.performance_metrics["total_cost"], 4),
+            "avg_latency_ms": round(agent.performance_metrics["avg_latency_ms"]),
+            "requests": agent.performance_metrics["requests"]
+        } for name, agent in self.agents.items()}
 
 
-if __name__ == '__main__':
-    async def main():
-        router = PromptRouter()
+async def main():
+    orchestrator = PromptOrchestrator()
 
-        print("--- Model Registry ---")
-        print(router.model_registry)
+    print("\n--- 1. Simple Request: Code Generation ---")
+    query1 = "Write a python script to download a file from a URL."
+    result1 = await orchestrator.handle_simple_request(query1)
+    print(f"Agent '{result1['agent_used']}' responded: {result1['response']}")
 
-        print("\n--- 1. Simple Routing: Find the cheapest model for summarization ---")
-        result1 = await router.route_prompt(
-            prompt="Summarize the history of the internet in 100 words.",
-            required_capability="summarization",
-            strategy="lowest_cost"
-        )
-        print(f"Selected Model: {result1['selected_model']}")
-        print(f"Response: {result1['result']['response']}")
+    print("\n--- 2. Simple Request: Data Analysis ---")
+    query2 = "Summarize the following text: [long text about AI ethics]"
+    result2 = await orchestrator.handle_simple_request(query2)
+    print(f"Agent '{result2['agent_used']}' responded: {result2['response']}")
 
-        print("\n--- 2. Simple Routing: Find the fastest model for code generation ---")
-        result2 = await router.route_prompt(
-            prompt="Write a Python function to calculate fibonacci.",
-            required_capability="code_generation",
-            strategy="lowest_latency"
-        )
-        print(f"Selected Model: {result2['selected_model']}")
-        print(f"Response: {result2['result']['response']}")
+    print("\n--- 3. Complex Chain of Thought ---")
+    complex_query = "Customer feedback: 'The new interface is sleek, but the analytics dashboard is slow.'"
+    chain_of_thought = [
+        {"agent": "DataAnalysisAgent", "task": "Extract the main sentiment and key topics from the feedback."},
+        {"agent": "CreativeWriterAgent", "task": "Based on the analysis, write a polite, empathetic customer-facing reply."}
+    ]
+    chain_result = await orchestrator.execute_complex_chain(complex_query, chain_of_thought)
 
-        print("\n--- 3. Aggregation: Ask two models for info and a third to synthesize it ---")
-        multi_prompts = [
-            {"prompt": "What is the capital of France?", "capability": "text_generation", "strategy": "lowest_cost"},
-            {"prompt": "What is the population of Paris?", "capability": "text_generation", "strategy": "lowest_latency"}
-        ]
-        aggregation_result = await router.route_and_aggregate(multi_prompts, final_aggregator_strategy="best_capability")
-        print("Final Synthesized Response:")
-        print(aggregation_result['final_response']['result']['response'])
+    print("Intermediate Steps:")
+    for i, step_result in enumerate(chain_result['intermediate_steps']):
+        print(f"  Step {i+1} ({step_result['agent_used']}): {step_result['response']}")
+    print("\nFinal Response:")
+    print(chain_result['final_response'])
 
-        print("\n--- Performance Dashboard ---")
-        print(router.get_performance_dashboard())
+    print("\n--- Performance Dashboard ---")
+    print(orchestrator.get_performance_dashboard())
 
+if __name__ == "__main__":
     asyncio.run(main())
