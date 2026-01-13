@@ -1,705 +1,204 @@
 """
-Advanced Encryption Standards Module
+Advanced Encryption Module with Secure Enclave Simulation.
 
-This module implements advanced encryption standards including quantum-resistant
-algorithms, homomorphic encryption, and secure key management for the IoT IIoT platform.
+This module provides a robust cryptographic service simulating a hardware
+secure enclave for key management and implementing a hybrid encryption scheme
+(similar to ECIES) for secure data exchange.
 """
 
-import asyncio
-import base64
-import hashlib
-import hmac
-import os
+import json
 import secrets
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.backends import default_backend
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Union
-from enum import Enum
-import logging
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Optional
 
-# Configure basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from Crypto.Cipher import AES, PKCS1_OAEP
+from Crypto.PublicKey import RSA
+from Crypto.Random import get_random_bytes
 
+from utils.logging_config import get_logger
 
-class EncryptionAlgorithm(Enum):
-    """Supported encryption algorithms."""
-    AES_256_GCM = "aes_256_gcm"
-    AES_256_CBC = "aes_256_cbc"
-    CHACHA20_POLY1305 = "chacha20_poly1305"
-    RSA_OAEP = "rsa_oaep"
-    ECDSA_P256 = "ecdsa_p256"
-    ECDSA_P384 = "ecdsa_p384"
-
-
-class KeyType(Enum):
-    """Types of cryptographic keys."""
-    SYMMETRIC = "symmetric"
-    ASYMMETRIC_PUBLIC = "asymmetric_public"
-    ASYMMETRIC_PRIVATE = "asymmetric_private"
-
-
-class QuantumResistanceLevel(Enum):
-    """Quantum resistance levels."""
-    CLASSICAL = "classical"  # Vulnerable to quantum attacks
-    HYBRID = "hybrid"       # Hybrid classical/quantum-resistant
-    QUANTUM_RESISTANT = "quantum_resistant"
-
-
-class AdvancedEncryption:
+class SecureEnclaveSimulator:
     """
-    Advanced encryption implementation with quantum resistance and modern standards.
+    Simulates a hardware secure enclave for key management.
 
-    Features:
-    - Quantum-resistant algorithms (CRYSTALS-Kyber, Dilithium)
-    - Homomorphic encryption for privacy-preserving computation
-    - Secure key management and rotation
-    - Multi-layer encryption
-    - Post-quantum cryptography
+    In a real system, this would be a hardware security module (HSM) or a
+    secure element in a CPU (e.g., Intel SGX, Apple Secure Enclave).
+    This simulation stores keys in memory and never exposes private keys.
     """
+    def __init__(self, logger):
+        self.logger = logger
+        self._key_pairs: Dict[str, Dict] = {} # {key_id: {'private': RsaKey, 'public': RsaKey, 'created_at': datetime}}
+        self._active_key_id: Optional[str] = None
+        self.logger.info("Secure Enclave Simulator initialized.")
 
-    def __init__(self, config: Optional[Dict] = None):
-        self.config = config or self._get_default_config()
-
-        # Key management
-        self.key_store: Dict[str, Dict] = {}
-        self.key_rotation_schedule: Dict[str, datetime] = {}
-
-        # Quantum-resistant algorithms (simulated for now)
-        self.quantum_resistant_enabled = True
-
-        # Homomorphic encryption context (placeholder)
-        self.he_context = None
-
-        self.logger = logging.getLogger(__name__)
-        self.logger.info("Advanced Encryption system initialized")
-
-    def _get_default_config(self) -> Dict:
-        """Get default configuration."""
-        return {
-            "default_algorithm": EncryptionAlgorithm.AES_256_GCM.value,
-            "key_rotation_days": 90,
-            "key_size": 32,  # 256 bits
-            "salt_size": 16,
-            "iterations": 100000,
-            "quantum_resistance_level": QuantumResistanceLevel.HYBRID.value,
-            "enable_homomorphic": False,
-            "enable_multiparty_computation": False,
+    def generate_key_pair(self, key_id: str, bits: int = 2048) -> str:
+        """Generates and stores a new RSA key pair inside the enclave."""
+        private_key = RSA.generate(bits)
+        public_key = private_key.publickey()
+        self._key_pairs[key_id] = {
+            "private": private_key,
+            "public": public_key,
+            "created_at": datetime.now(timezone.utc)
         }
+        if not self._active_key_id:
+            self._active_key_id = key_id
+        self.logger.info(f"Generated and stored new {bits}-bit key pair with ID: {key_id}")
+        return public_key.export_key().decode('utf-8')
 
-    async def encrypt_data(
-        self,
-        data: Union[str, bytes],
-        key_id: Optional[str] = None,
-        algorithm: Optional[EncryptionAlgorithm] = None,
-        additional_data: Optional[bytes] = None
-    ) -> Dict[str, Union[str, bytes]]:
+    def get_public_key(self, key_id: Optional[str] = None) -> Optional[str]:
+        """Retrieves the public key for a given key ID (or the active one)."""
+        target_key_id = key_id or self._active_key_id
+        if target_key_id in self._key_pairs:
+            return self._key_pairs[target_key_id]["public"].export_key().decode('utf-8')
+        self.logger.warning(f"Public key for ID '{target_key_id}' not found.")
+        return None
+
+    def rotate_keys(self, new_key_id: str):
+        """Generates a new key pair and sets it as the active one."""
+        self.generate_key_pair(new_key_id)
+        self._active_key_id = new_key_id
+        self.logger.info(f"Key rotation complete. New active key ID is '{new_key_id}'.")
+
+    def _decrypt_with_private_key(self, key_id: str, ciphertext: bytes) -> bytes:
+        """Internal method to decrypt using a stored private key."""
+        if key_id not in self._key_pairs:
+            raise ValueError(f"Key ID '{key_id}' not found in enclave.")
+
+        private_key = self._key_pairs[key_id]["private"]
+        cipher_rsa = PKCS1_OAEP.new(private_key)
+        return cipher_rsa.decrypt(ciphertext)
+
+class HybridEncryptionService:
+    """
+    Provides hybrid encryption using RSA and AES-GCM.
+
+    This service encrypts data using a fresh symmetric key (AES) for each message,
+    and then encrypts that symmetric key with the recipient's public RSA key.
+    """
+    def __init__(self, enclave: SecureEnclaveSimulator):
+        self.enclave = enclave
+        self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
+
+    def encrypt(self, data: bytes, recipient_public_key_pem: str, recipient_key_id: str) -> str:
         """
-        Encrypt data using advanced encryption standards.
+        Encrypts data using a hybrid encryption scheme.
 
         Args:
-            data: Data to encrypt
-            key_id: Key identifier (generated if None)
-            algorithm: Encryption algorithm
-            additional_data: Additional authenticated data for AEAD
+            data: The raw bytes to encrypt.
+            recipient_public_key_pem: The PEM-encoded public key of the recipient.
+            recipient_key_id: The identifier for the recipient's key pair.
 
         Returns:
-            Encryption result with ciphertext, key info, etc.
+            A JSON string containing all necessary components for decryption.
+        """
+        # 1. Import recipient's public key
+        recipient_public_key = RSA.import_key(recipient_public_key_pem)
+
+        # 2. Generate a one-time AES session key
+        session_key = get_random_bytes(16)
+
+        # 3. Encrypt the session key with the recipient's public RSA key
+        cipher_rsa = PKCS1_OAEP.new(recipient_public_key)
+        encrypted_session_key = cipher_rsa.encrypt(session_key)
+
+        # 4. Encrypt the data with the AES session key using GCM mode
+        cipher_aes = AES.new(session_key, AES.MODE_GCM)
+        ciphertext, tag = cipher_aes.encrypt_and_digest(data)
+
+        # 5. Pack everything into a JSON object for transport
+        encrypted_payload = {
+            "key_id": recipient_key_id,  # CRITICAL: Use the recipient's key ID
+            "encrypted_session_key": encrypted_session_key.hex(),
+            "nonce": cipher_aes.nonce.hex(),
+            "tag": tag.hex(),
+            "ciphertext": ciphertext.hex()
+        }
+        self.logger.info(f"Data encrypted for recipient key ID '{recipient_key_id}'.")
+        return json.dumps(encrypted_payload)
+
+    def decrypt(self, encrypted_payload_json: str) -> bytes:
+        """
+        Decrypts a hybrid encrypted payload using a private key from the enclave.
         """
         try:
-            # Convert data to bytes
-            if isinstance(data, str):
-                data_bytes = data.encode('utf-8')
-            else:
-                data_bytes = data
-
-            # Select algorithm
-            alg = algorithm or EncryptionAlgorithm(self.config["default_algorithm"])
-
-            # Get or generate key
-            if key_id and key_id in self.key_store:
-                key_info = self.key_store[key_id]
-                key = key_info["key"]
-            else:
-                key, key_id = await self._generate_key(alg)
-                key_info = self.key_store[key_id]
-
-            # Perform encryption based on algorithm
-            if alg in [EncryptionAlgorithm.AES_256_GCM, EncryptionAlgorithm.AES_256_CBC]:
-                result = await self._encrypt_symmetric(data_bytes, key, alg, additional_data)
-            elif alg == EncryptionAlgorithm.CHACHA20_POLY1305:
-                result = await self._encrypt_chacha20(data_bytes, key, additional_data)
-            elif alg in [EncryptionAlgorithm.RSA_OAEP]:
-                result = await self._encrypt_asymmetric(data_bytes, key)
-            else:
-                raise ValueError(f"Unsupported encryption algorithm: {alg}")
-
-            # Add quantum resistance if enabled
-            if self.quantum_resistant_enabled:
-                result, quantum_key = await self._add_quantum_resistance(result)
-                # For the demo, we embed the key. In a real system, this would be managed securely.
-                result['ephemeral_quantum_key'] = quantum_key
-
-            # Add metadata
-            result.update({
-                "key_id": key_id,
-                "algorithm": alg.value,
-                "timestamp": datetime.now().isoformat(),
-                "quantum_resistant": self.quantum_resistant_enabled
-            })
-
-            return result
-
-        except Exception as e:
-            self.logger.error(f"Encryption failed: {e}")
-            raise
-
-    async def decrypt_data(
-        self,
-        encrypted_data: Dict[str, Union[str, bytes]],
-        key_id: Optional[str] = None
-    ) -> bytes:
-        """
-        Decrypt data using appropriate decryption method.
-
-        Args:
-            encrypted_data: Encrypted data dictionary
-            key_id: Key identifier (if not in encrypted_data)
-
-        Returns:
-            Decrypted data
-        """
-        try:
-            algorithm = EncryptionAlgorithm(encrypted_data["algorithm"])
-            key_id = key_id or encrypted_data.get("key_id")
-
-            if not key_id or key_id not in self.key_store:
-                raise ValueError(f"Key {key_id} not found")
-
-            key_info = self.key_store[key_id]
-            key = key_info["key"]
-
-            # Remove quantum resistance layer if present
-            if encrypted_data.get("quantum_resistant"):
-                quantum_key = encrypted_data.get('ephemeral_quantum_key')
-                encrypted_data = await self._remove_quantum_resistance(encrypted_data, quantum_key)
-
-            # Perform decryption based on algorithm
-            if algorithm in [EncryptionAlgorithm.AES_256_GCM, EncryptionAlgorithm.AES_256_CBC]:
-                plaintext = await self._decrypt_symmetric(encrypted_data, key, algorithm)
-            elif algorithm == EncryptionAlgorithm.CHACHA20_POLY1305:
-                plaintext = await self._decrypt_chacha20(encrypted_data, key)
-            elif algorithm in [EncryptionAlgorithm.RSA_OAEP]:
-                plaintext = await self._decrypt_asymmetric(encrypted_data, key)
-            else:
-                raise ValueError(f"Unsupported decryption algorithm: {algorithm}")
-
-            return plaintext
-
-        except Exception as e:
-            self.logger.error(f"Decryption failed: {e}")
-            raise
-
-    async def _generate_key(self, algorithm: EncryptionAlgorithm) -> Tuple[bytes, str]:
-        """Generate encryption key."""
-        if algorithm in [EncryptionAlgorithm.AES_256_GCM, EncryptionAlgorithm.AES_256_CBC]:
-            key = secrets.token_bytes(self.config["key_size"])
-        elif algorithm == EncryptionAlgorithm.CHACHA20_POLY1305:
-            key = secrets.token_bytes(32)  # 256 bits
-        elif algorithm in [EncryptionAlgorithm.RSA_OAEP]:
-            # Generate RSA key pair
-            private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend()
-            )
-            key = private_key
-        elif algorithm in [EncryptionAlgorithm.ECDSA_P256, EncryptionAlgorithm.ECDSA_P384]:
-            # Generate EC key pair
-            curve = ec.SECP256R1() if algorithm == EncryptionAlgorithm.ECDSA_P256 else ec.SECP384R1()
-            private_key = ec.generate_private_key(curve, default_backend())
-            key = private_key
-        else:
-            raise ValueError(f"Unsupported algorithm for key generation: {algorithm}")
-
-        # Generate key ID
-        key_id = secrets.token_hex(16)
-
-        # Store key with metadata
-        self.key_store[key_id] = {
-            "key": key,
-            "algorithm": algorithm.value,
-            "created_at": datetime.now(),
-            "expires_at": datetime.now() + timedelta(days=self.config["key_rotation_days"]),
-            "type": KeyType.SYMMETRIC.value if isinstance(key, bytes) else KeyType.ASYMMETRIC_PRIVATE.value
-        }
-
-        # Schedule rotation
-        self.key_rotation_schedule[key_id] = self.key_store[key_id]["expires_at"]
-
-        return key, key_id
-
-    async def _encrypt_symmetric(
-        self,
-        data: bytes,
-        key: bytes,
-        algorithm: EncryptionAlgorithm,
-        additional_data: Optional[bytes] = None
-    ) -> Dict[str, bytes]:
-        """Encrypt data using symmetric encryption."""
-        if algorithm == EncryptionAlgorithm.AES_256_GCM:
-            # Generate nonce
-            nonce = secrets.token_bytes(12)  # 96 bits for GCM
-
-            # Create cipher
-            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce), backend=default_backend())
-            encryptor = cipher.encryptor()
-
-            # Add additional data if provided
-            if additional_data:
-                encryptor.authenticate_additional_data(additional_data)
-
-            # Encrypt
-            ciphertext = encryptor.update(data) + encryptor.finalize()
-
-            return {
-                "ciphertext": ciphertext,
-                "nonce": nonce,
-                "tag": encryptor.tag
-            }
-
-        elif algorithm == EncryptionAlgorithm.AES_256_CBC:
-            # Generate IV
-            iv = secrets.token_bytes(16)
-
-            # Create cipher
-            cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-            encryptor = cipher.encryptor()
-
-            # PKCS7 padding
-            from cryptography.hazmat.primitives import padding
-            padder = padding.PKCS7(128).padder()
-            padded_data = padder.update(data) + padder.finalize()
-
-            # Encrypt
-            ciphertext = encryptor.update(padded_data) + encryptor.finalize()
-
-            return {
-                "ciphertext": ciphertext,
-                "iv": iv
-            }
-
-        else:
-            raise ValueError(f"Unsupported symmetric algorithm: {algorithm}")
-
-    async def _decrypt_symmetric(
-        self,
-        encrypted_data: Dict[str, bytes],
-        key: bytes,
-        algorithm: EncryptionAlgorithm
-    ) -> bytes:
-        """Decrypt data using symmetric decryption."""
-        if algorithm == EncryptionAlgorithm.AES_256_GCM:
-            nonce = encrypted_data["nonce"]
-            ciphertext = encrypted_data["ciphertext"]
-            tag = encrypted_data["tag"]
-
-            cipher = Cipher(algorithms.AES(key), modes.GCM(nonce, tag), backend=default_backend())
-            decryptor = cipher.decryptor()
-
-            if "additional_data" in encrypted_data:
-                decryptor.authenticate_additional_data(encrypted_data["additional_data"])
-
-            plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-            return plaintext
-
-        elif algorithm == EncryptionAlgorithm.AES_256_CBC:
-            iv = encrypted_data["iv"]
-            ciphertext = encrypted_data["ciphertext"]
-
-            cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-            decryptor = cipher.decryptor()
-
-            padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-
-            # Remove PKCS7 padding
-            from cryptography.hazmat.primitives import padding
-            unpadder = padding.PKCS7(128).unpadder()
-            plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
-
-            return plaintext
-
-        else:
-            raise ValueError(f"Unsupported symmetric algorithm: {algorithm}")
-
-    async def _encrypt_chacha20(
-        self,
-        data: bytes,
-        key: bytes,
-        additional_data: Optional[bytes] = None
-    ) -> Dict[str, bytes]:
-        """Encrypt data using ChaCha20-Poly1305."""
-        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-
-        nonce = secrets.token_bytes(12)  # 96 bits
-        cipher = ChaCha20Poly1305(key)
-
-        ciphertext = cipher.encrypt(nonce, data, additional_data)
-
-        return {
-            "ciphertext": ciphertext,
-            "nonce": nonce,
-            "additional_data": additional_data
-        }
-
-    async def _decrypt_chacha20(
-        self,
-        encrypted_data: Dict[str, bytes],
-        key: bytes
-    ) -> bytes:
-        """Decrypt data using ChaCha20-Poly1305."""
-        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-
-        nonce = encrypted_data["nonce"]
-        ciphertext = encrypted_data["ciphertext"]
-        additional_data = encrypted_data.get("additional_data")
-
-        cipher = ChaCha20Poly1305(key)
-        plaintext = cipher.decrypt(nonce, ciphertext, additional_data)
-
-        return plaintext
-
-    async def _encrypt_asymmetric(self, data: bytes, private_key) -> Dict[str, bytes]:
-        """Encrypt data using asymmetric encryption."""
-        # For RSA-OAEP
-        public_key = private_key.public_key()
-
-        ciphertext = public_key.encrypt(
-            data,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-
-        return {
-            "ciphertext": ciphertext
-        }
-
-    async def _decrypt_asymmetric(self, encrypted_data: Dict[str, bytes], private_key) -> bytes:
-        """Decrypt data using asymmetric decryption."""
-        ciphertext = encrypted_data["ciphertext"]
-
-        plaintext = private_key.decrypt(
-            ciphertext,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-
-        return plaintext
-
-    async def sign_data(self, data: bytes, key_id: str) -> bytes:
-        """
-        Create a digital signature for the data.
-
-        Args:
-            data: The data to be signed.
-            key_id: The ID of the private EC key to use for signing.
-
-        Returns:
-            The digital signature.
-        """
-        key_info = self.get_key_info(key_id)
-        if not key_info or key_info['type'] != KeyType.ASYMMETRIC_PRIVATE.value:
-            raise ValueError(f"A valid private asymmetric key is required for signing. Key ID: {key_id}")
-
-        private_key = key_info['key']
-        if not isinstance(private_key, ec.EllipticCurvePrivateKey):
-            raise TypeError("Signing requires an Elliptic Curve private key.")
-
-        signature = private_key.sign(
-            data,
-            ec.ECDSA(hashes.SHA256())
-        )
-        return signature
-
-    async def verify_signature(self, data: bytes, signature: bytes, key_id: str) -> bool:
-        """
-        Verify the digital signature of the data.
-
-        Args:
-            data: The data that was signed.
-            signature: The signature to verify.
-            key_id: The ID of the private key whose public part will be used for verification.
-
-        Returns:
-            True if the signature is valid, False otherwise.
-        """
-        key_info = self.get_key_info(key_id)
-        if not key_info:
-            raise ValueError(f"Key ID {key_id} not found.")
-
-        private_key = key_info['key']
-        public_key = private_key.public_key()
-
-        if not isinstance(public_key, ec.EllipticCurvePublicKey):
-            raise TypeError("Verification requires an Elliptic Curve public key.")
-
-        try:
-            public_key.verify(
-                signature,
-                data,
-                ec.ECDSA(hashes.SHA256())
-            )
-            return True
-        except Exception: # Catches InvalidSignature specifically
-            return False
-
-    async def _add_quantum_resistance(self, encrypted_data: Dict) -> Tuple[Dict, bytes]:
-        """
-        Add quantum resistance layer (simplified implementation).
-        Returns the modified encrypted data and the ephemeral quantum key used.
-        """
-        quantum_key = secrets.token_bytes(32)
-        quantum_alg = EncryptionAlgorithm.AES_256_GCM
-
-        data_to_protect = str(encrypted_data).encode('utf-8')
-        quantum_encrypted = await self._encrypt_symmetric(
-            data_to_protect, quantum_key, quantum_alg
-        )
-
-        result = {
-            "quantum_layer": quantum_encrypted,
-            "quantum_key_fingerprint": hashlib.sha256(quantum_key).hexdigest()[:16],
-            "original_data": encrypted_data
-        }
-        return result, quantum_key
-
-    async def _remove_quantum_resistance(self, encrypted_data: Dict, quantum_key: bytes) -> Dict:
-        """
-        Remove quantum resistance layer using the provided key.
-        """
-        if "quantum_layer" not in encrypted_data:
-            return encrypted_data
-
-        if quantum_key is None:
-            raise ValueError("A quantum key is required for decryption of the quantum layer.")
-
-        quantum_layer = encrypted_data["quantum_layer"]
-        decrypted_data_str = await self._decrypt_symmetric(
-            quantum_layer, quantum_key, EncryptionAlgorithm.AES_256_GCM
-        )
-
-        # Parse back to dict
-        import ast
-        original_data = ast.literal_eval(decrypted_data_str.decode('utf-8'))
-
-        return original_data
-
-    async def rotate_keys(self):
-        """Rotate expired keys."""
-        now = datetime.now()
-        expired_keys = [
-            key_id for key_id, expiry in self.key_rotation_schedule.items()
-            if expiry <= now
-        ]
-
-        for key_id in expired_keys:
-            await self._rotate_key(key_id)
-
-        self.logger.info(f"Rotated {len(expired_keys)} keys")
-
-    async def _rotate_key(self, key_id: str):
-        """Rotate a specific key."""
-        if key_id not in self.key_store:
-            return
-
-        old_key_info = self.key_store[key_id]
-        algorithm = EncryptionAlgorithm(old_key_info["algorithm"])
-
-        # Generate new key
-        new_key, new_key_id = await self._generate_key(algorithm)
-
-        # Update key store
-        self.key_store[new_key_id] = self.key_store[key_id].copy()
-        self.key_store[new_key_id]["key"] = new_key
-        self.key_store[new_key_id]["created_at"] = datetime.now()
-        self.key_store[new_key_id]["rotated_from"] = key_id
-
-        # Mark old key as expired but keep for decryption
-        self.key_store[key_id]["expired"] = True
-        self.key_store[key_id]["rotated_to"] = new_key_id
-
-        # Update rotation schedule
-        del self.key_rotation_schedule[key_id]
-        self.key_rotation_schedule[new_key_id] = self.key_store[new_key_id]["expires_at"]
-
-    def get_key_info(self, key_id: str) -> Optional[Dict]:
-        """Get information about a key."""
-        return self.key_store.get(key_id)
-
-    def list_keys(self) -> List[Dict]:
-        """List all keys."""
-        return [
-            {
-                "key_id": key_id,
-                "algorithm": info["algorithm"],
-                "created_at": info["created_at"].isoformat(),
-                "expires_at": info["expires_at"].isoformat(),
-                "type": info["type"],
-                "expired": info.get("expired", False)
-            }
-            for key_id, info in self.key_store.items()
-        ]
-
-    async def homomorphic_encrypt(self, data: Union[int, float]) -> Dict:
-        """Perform homomorphic encryption (placeholder)."""
-        if not self.config["enable_homomorphic"]:
-            raise ValueError("Homomorphic encryption not enabled")
-
-        # Placeholder for homomorphic encryption implementation
-        # In real implementation, would use libraries like TenSEAL or Microsoft SEAL
-
-        return {
-            "encrypted_value": base64.b64encode(str(data).encode()).decode(),
-            "scheme": "placeholder",
-            "allow_operations": ["addition", "multiplication"]
-        }
-
-    async def homomorphic_compute(self, encrypted_values: List[Dict], operation: str) -> Dict:
-        """Perform computation on homomorphically encrypted data."""
-        # Placeholder implementation
-        return {
-            "result": "computed_result_placeholder",
-            "operation": operation
-        }
-
-    def derive_key_from_password(self, password: str, salt: bytes = None, key_length: int = 32) -> Tuple[bytes, bytes]:
-        """
-        Derive a secure key from a password using PBKDF2.
-
-        Args:
-            password: The password to derive the key from.
-            salt: A random salt. If not provided, a new one is generated.
-            key_length: The desired length of the derived key in bytes.
-
-        Returns:
-            A tuple containing the derived key and the salt used.
-        """
-        if salt is None:
-            salt = secrets.token_bytes(self.config.get("salt_size", 16))
-
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=key_length,
-            salt=salt,
-            iterations=self.config.get("iterations", 100000),
-            backend=default_backend()
-        )
-        key = kdf.derive(password.encode('utf-8'))
-        return key, salt
-
-
-# Global encryption instance
-advanced_encryption = AdvancedEncryption()
-
-
-async def encrypt_data(
-    data: Union[str, bytes],
-    key_id: Optional[str] = None,
-    algorithm: Optional[str] = None
-) -> Dict[str, Union[str, bytes]]:
-    """Encrypt data using advanced encryption."""
-    alg = EncryptionAlgorithm(algorithm) if algorithm else None
-    return await advanced_encryption.encrypt_data(data, key_id, alg)
-
-
-async def decrypt_data(encrypted_data: Dict[str, Union[str, bytes]]) -> bytes:
-    """Decrypt data using advanced encryption."""
-    return await advanced_encryption.decrypt_data(encrypted_data)
-
-
-def get_key_info(key_id: str) -> Optional[Dict]:
-    """Get key information."""
-    return advanced_encryption.get_key_info(key_id)
-
-
-def list_encryption_keys() -> List[Dict]:
-    """List encryption keys."""
-    return advanced_encryption.list_keys()
-
-
-async def sign_data(data: bytes, key_id: str) -> bytes:
-    """Create a digital signature for data."""
-    return await advanced_encryption.sign_data(data, key_id)
-
-
-async def verify_signature(data: bytes, signature: bytes, key_id: str) -> bool:
-    """Verify a digital signature."""
-    return await advanced_encryption.verify_signature(data, signature, key_id)
-
-
-def derive_key_from_password(password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
-    """Derive a secure key from a password."""
-    return advanced_encryption.derive_key_from_password(password, salt)
-
-
-async def main_demo():
-    """Demonstrates the advanced encryption functionalities."""
-    print("--- Advanced Encryption Demo ---")
-
-    # 1. Symmetric Encryption/Decryption
-    print("\n1. Testing Symmetric Encryption (AES-256-GCM)...")
-    original_text = "This is a highly confidential message for the IoT platform."
-    encrypted_blob = await encrypt_data(original_text, algorithm='aes_256_gcm')
-    key_id = encrypted_blob['key_id']
-    print(f"   - Encrypted successfully. Key ID: {key_id}")
-    decrypted_text = await decrypt_data(encrypted_blob)
-    assert decrypted_text.decode('utf-8') == original_text
-    print("   - Decryption successful. Data matches.")
-
-    # 2. Digital Signature (ECDSA)
-    print("\n2. Testing Digital Signatures (ECDSA)...")
-    # Generate a new ECDSA key for signing
-    _, sign_key_id = await advanced_encryption._generate_key(EncryptionAlgorithm.ECDSA_P256)
-    print(f"   - Generated a new ECDSA key. Key ID: {sign_key_id}")
-
-    message_to_sign = b"This data must be authentic and integral."
-    signature = await sign_data(message_to_sign, sign_key_id)
-    print(f"   - Data signed. Signature length: {len(signature)} bytes.")
-
-    # Verification
-    is_valid = await verify_signature(message_to_sign, signature, sign_key_id)
-    assert is_valid
-    print(f"   - Signature verification successful: {is_valid}")
-
-    is_invalid = await verify_signature(b"tampered data", signature, sign_key_id)
-    assert not is_invalid
-    print(f"   - Verification of tampered data correctly failed: {not is_invalid}")
-
-    # 3. Key Derivation from Password
-    print("\n3. Testing Key Derivation from Password (PBKDF2)...")
-    password = "supersecretpassword123"
-    derived_key, salt = derive_key_from_password(password)
-    print(f"   - Derived a {len(derived_key)*8}-bit key from password.")
-    print(f"   - Salt (hex): {salt.hex()}")
-
-    # Verify that the same password and salt produce the same key
-    derived_key_2, _ = derive_key_from_password(password, salt)
-    assert derived_key == derived_key_2
-    print("   - Key derivation is deterministic and successful.")
-
-    print("\n--- Demo Complete ---")
-
+            payload = json.loads(encrypted_payload_json)
+            key_id = payload["key_id"]
+
+            # 1. Decrypt the session key using the enclave's private key
+            encrypted_session_key = bytes.fromhex(payload["encrypted_session_key"])
+            session_key = self.enclave._decrypt_with_private_key(key_id, encrypted_session_key)
+
+            # 2. Decrypt the data using the AES session key
+            nonce = bytes.fromhex(payload["nonce"])
+            tag = bytes.fromhex(payload["tag"])
+            ciphertext = bytes.fromhex(payload["ciphertext"])
+
+            cipher_aes = AES.new(session_key, AES.MODE_GCM, nonce=nonce)
+            decrypted_data = cipher_aes.decrypt_and_verify(ciphertext, tag)
+
+            self.logger.info("Data decrypted successfully.")
+            return decrypted_data
+        except (ValueError, KeyError, TypeError) as e:
+            self.logger.error(f"Decryption failed due to malformed payload or key error: {e}")
+            raise ValueError("Decryption failed. The payload may be corrupt or the key invalid.")
 
 if __name__ == "__main__":
-    asyncio.run(main_demo())
+    async def main():
+        print("--- Advanced Encryption with Secure Enclave and Hybrid Scheme Demo ---")
+        logger = get_logger("EncryptionDemo")
+
+        # 1. Initialize the Secure Enclave and Encryption Service
+        print("\n--- 1. Initializing Secure Enclave and Services ---")
+        enclave = SecureEnclaveSimulator(logger)
+        hybrid_service = HybridEncryptionService(enclave)
+
+        # 2. Generate key pairs for two parties: Alice and Bob
+        print("\n--- 2. Generating Key Pairs for Alice and Bob ---")
+        alice_public_key_pem = enclave.generate_key_pair("alice_key_v1")
+        bob_public_key_pem = enclave.generate_key_pair("bob_key_v1")
+        print("Alice's and Bob's keys are generated and stored in the enclave.")
+        # Note: We only get their public keys back. Private keys never leave the enclave.
+
+        # 3. Alice encrypts a message for Bob
+        print("\n--- 3. Alice encrypts a secret message for Bob ---")
+        secret_message = b"Meet at the usual place at midnight. The eagle has landed."
+        # Alice uses Bob's public key to encrypt the message
+        encrypted_message_for_bob = hybrid_service.encrypt(secret_message, bob_public_key_pem, "bob_key_v1")
+        print("Message encrypted. Transmitting the following payload:")
+        print(encrypted_message_for_bob)
+
+        # 4. Bob decrypts the message using the service (which uses his private key from the enclave)
+        print("\n--- 4. Bob receives and decrypts the message ---")
+        # Bob's side of the application calls the decrypt service.
+        # The service automatically finds the correct private key ('bob_key_v1') in the enclave.
+        decrypted_message = hybrid_service.decrypt(encrypted_message_for_bob)
+
+        print(f"Decrypted message: {decrypted_message.decode('utf-8')}")
+        assert secret_message == decrypted_message
+        print("SUCCESS: Decrypted message matches original secret.")
+
+        # 5. Demonstrate Key Rotation
+        print("\n--- 5. Bob rotates his encryption key ---")
+        enclave.rotate_keys("bob_key_v2")
+        new_bob_public_key_pem = enclave.get_public_key() # Gets the new active key
+
+        print(f"Bob's active key is now '{enclave._active_key_id}'.")
+        assert enclave._active_key_id == "bob_key_v2"
+
+        # Alice encrypts a new message with Bob's NEW public key
+        new_secret = b"The plan has changed. Await new instructions."
+        encrypted_new_secret = hybrid_service.encrypt(new_secret, new_bob_public_key_pem, "bob_key_v2")
+
+        # Bob decrypts the new message
+        decrypted_new_secret = hybrid_service.decrypt(encrypted_new_secret)
+        assert new_secret == decrypted_new_secret
+        print("SUCCESS: Message encrypted with rotated key was decrypted successfully.")
+
+        # Try to decrypt the OLD message (should still work if old key is retained)
+        print("\n--- 6. Bob tries to decrypt the old message with the old key ---")
+        old_message_decrypted = hybrid_service.decrypt(encrypted_message_for_bob)
+        assert secret_message == old_message_decrypted
+        print("SUCCESS: Old message can still be decrypted with the previous key.")
+
+    import asyncio
+    asyncio.run(main())
