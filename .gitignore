@@ -1,6 +1,9 @@
 # Ignore generated HTML files
 *.html
 
+# Ignore generated image files
+*.png
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
