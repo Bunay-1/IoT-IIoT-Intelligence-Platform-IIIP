@@ -1,144 +1,237 @@
 """
-Advanced Visualization Module
+Advanced Visualization Module for Manufacturing Analytics
 
-This module provides a comprehensive suite of tools for creating advanced, interactive,
-and multi-dimensional data visualizations for the IoT IIoT Intelligence Platform.
+This module generates a sophisticated, multi-panel interactive dashboard for
+analyzing simulated sensor data from a global network of factories. It showcases
+advanced visualizations like geospatial maps, 3D scatter plots, time series,
+and correlation heatmaps.
 """
 
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
-from typing import Dict, List, Optional, Any
+from plotly.subplots import make_subplots
+import asyncio
 
-class AdvancedVisualization:
+from utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+def generate_factory_sensor_data(num_factories: int = 5, num_data_points: int = 200) -> pd.DataFrame:
     """
-    A stateful manager for creating and managing complex data visualizations.
+    Generates a realistic, correlated dataset simulating sensor readings from multiple factories.
+
+    Args:
+        num_factories: The number of distinct factories to simulate.
+        num_data_points: The number of sensor readings per factory.
+
+    Returns:
+        A pandas DataFrame with the simulated data.
     """
-    def __init__(self, data: Optional[pd.DataFrame] = None):
-        """
-        Initializes the visualization manager with an optional pandas DataFrame.
+    logger.info(f"Generating simulated sensor data for {num_factories} factories...")
 
-        Args:
-            data: The initial dataset to work with.
-        """
-        self.data = data if data is not None else pd.DataFrame()
-        self.fig: Optional[go.Figure] = None
+    factory_locations = {
+        'Factory_A': (40.7128, -74.0060),  # New York
+        'Factory_B': (34.0522, -118.2437), # Los Angeles
+        'Factory_C': (51.5074, -0.1278),   # London
+        'Factory_D': (35.6895, 139.6917),  # Tokyo
+        'Factory_E': (48.8566, 2.3522),    # Paris
+    }
+    factory_ids = list(factory_locations.keys())[:num_factories]
 
-    def load_data(self, data: pd.DataFrame):
-        """Loads or replaces the dataset."""
+    data_frames = []
+
+    for i, factory_id in enumerate(factory_ids):
+        lat, lon = factory_locations[factory_id]
+
+        # Base operational parameters for each factory
+        base_temp = 20 + (i * 5) + np.random.randn(num_data_points).cumsum() * 0.1
+        base_pressure = 1010 + (i * 2) + np.random.randn(num_data_points).cumsum() * 0.05
+
+        # Create correlated data
+        timestamps = pd.to_datetime(np.arange(num_data_points), unit='h', origin=pd.Timestamp('2023-01-01'))
+        temperature = base_temp + np.sin(np.arange(num_data_points) / 24 * 2 * np.pi) * 2 # Daily cycle
+        pressure = base_pressure + np.random.normal(0, 0.5, num_data_points)
+
+        # Vibration correlated with temperature and pressure
+        vibration = 0.1 * temperature + 0.05 * (pressure - 1010) + np.random.normal(0, 0.1, num_data_points)
+
+        # Energy consumption is a function of all three
+        energy_consumption = 500 + (temperature - 20) * 10 + (pressure - 1010) * 5 + vibration * 20 + np.random.normal(0, 20, num_data_points)
+
+        # Production output is optimal at a certain temp/pressure range
+        temp_efficiency = 1 - (abs(temperature - 25) / 10)
+        pressure_efficiency = 1 - (abs(pressure - 1015) / 10)
+        production_output = 100 * temp_efficiency * pressure_efficiency + np.random.normal(0, 5, num_data_points)
+
+        df = pd.DataFrame({
+            'timestamp': timestamps,
+            'factory_id': factory_id,
+            'latitude': lat,
+            'longitude': lon,
+            'temperature': np.clip(temperature, 15, 40),
+            'pressure': np.clip(pressure, 1000, 1030),
+            'vibration': np.clip(vibration, 0, 10),
+            'energy_consumption': np.clip(energy_consumption, 400, 700),
+            'production_output': np.clip(production_output, 50, 120)
+        })
+        data_frames.append(df)
+
+    return pd.concat(data_frames, ignore_index=True)
+
+
+class ManufacturingDashboard:
+    """
+    Creates a multi-faceted dashboard for analyzing manufacturing data.
+    """
+    def __init__(self, data: pd.DataFrame):
         self.data = data
-
-    def plot_3d_surface(self, x_col: str, y_col: str, z_col: str, title: str = "3D Surface Plot") -> go.Figure:
-        """
-        Generates an interactive 3D surface plot.
-
-        Args:
-            x_col: The column name for the X-axis.
-            y_col: The column name for the Y-axis.
-            z_col: The column name for the Z-axis.
-            title: The title of the plot.
-
-        Returns:
-            A Plotly Figure object.
-        """
-        if self.data.empty or not all(c in self.data.columns for c in [x_col, y_col, z_col]):
-            raise ValueError("Data is not loaded or columns are missing for 3D plot.")
-
-        fig = go.Figure(data=[go.Mesh3d(
-            x=self.data[x_col],
-            y=self.data[y_col],
-            z=self.data[z_col],
-            opacity=0.5,
-            intensity=self.data[z_col],
-            colorscale='Viridis'
-        )])
-
-        fig.update_layout(
-            title_text=title,
-            scene=dict(xaxis_title=x_col, yaxis_title=y_col, zaxis_title=z_col)
+        self.fig = make_subplots(
+            rows=2, cols=2,
+            specs=[[{'type': 'scattergeo'}, {'type': 'heatmap'}],
+                   [{'type': 'scatter3d'}, {'type': 'xy'}]],
+            subplot_titles=(
+                "Global Factory Operations Overview",
+                "Sensor Correlation Matrix",
+                "Production Output Drivers (3D)",
+                "Energy vs. Temperature (Factory A)"
+            )
         )
-        self.fig = fig
-        return fig
+        logger.info("Initialized dashboard structure.")
 
-    def plot_geospatial_heatmap(self, lat_col: str, lon_col: str, z_col: str, title: str = "Geospatial Heatmap") -> go.Figure:
-        """
-        Generates an interactive geospatial heatmap on a world map.
+    def _add_geospatial_map(self):
+        """Adds a geospatial map of factory locations to the dashboard."""
+        summary = self.data.groupby('factory_id').agg({
+            'latitude': 'first', 'longitude': 'first',
+            'production_output': 'mean', 'temperature': 'mean'
+        }).reset_index()
 
-        Args:
-            lat_col: The column name for latitude.
-            lon_col: The column name for longitude.
-            z_col: The column name for the intensity/value at each coordinate.
-            title: The title of the plot.
+        self.fig.add_trace(go.Scattergeo(
+            lon=summary['longitude'],
+            lat=summary['latitude'],
+            text=summary['factory_id'],
+            mode='markers',
+            marker=dict(
+                size=summary['production_output'] / 5, # Size by output
+                color=summary['temperature'], # Color by temp
+                colorscale='Bluered',
+                showscale=True,
+                colorbar_title="Avg Temp (°C)"
+            )
+        ), row=1, col=1)
+        logger.debug("Added geospatial map to dashboard.")
 
-        Returns:
-            A Plotly Figure object.
-        """
-        if self.data.empty or not all(c in self.data.columns for c in [lat_col, lon_col, z_col]):
-            raise ValueError("Data is not loaded or columns are missing for geospatial plot.")
+    def _add_correlation_heatmap(self):
+        """Adds a correlation matrix of sensor data."""
+        corr_data = self.data[['temperature', 'pressure', 'vibration', 'energy_consumption', 'production_output']].corr()
+        self.fig.add_trace(go.Heatmap(
+            z=corr_data.values,
+            x=corr_data.columns,
+            y=corr_data.columns,
+            colorscale='Blues'
+        ), row=1, col=2)
+        logger.debug("Added correlation heatmap to dashboard.")
 
-        fig = go.Figure(data=go.Densitymap(
-            lat=self.data[lat_col],
-            lon=self.data[lon_col],
-            z=self.data[z_col],
-            radius=10
-        ))
+    def _add_3d_scatter(self):
+        """Adds a 3D scatter plot to explore production drivers."""
+        sample = self.data.sample(n=min(500, len(self.data))) # Sample for performance
+        self.fig.add_trace(go.Scatter3d(
+            x=sample['temperature'],
+            y=sample['pressure'],
+            z=sample['production_output'],
+            mode='markers',
+            marker=dict(
+                size=5,
+                color=sample['energy_consumption'], # Color by energy
+                colorscale='Viridis',
+                colorbar_title="Energy (kWh)",
+                opacity=0.8
+            )
+        ), row=2, col=1)
 
-        fig.update_layout(
-            map_style="stamen-terrain",
-            map_center_lon=0,
-            map_center_lat=0,
-            map_zoom=1,
-            title_text=title
+        # Update 3D scene layout
+        self.fig.update_layout(
+            scene=dict(
+                xaxis_title='Temperature (°C)',
+                yaxis_title='Pressure (hPa)',
+                zaxis_title='Production Output'
+            )
         )
-        self.fig = fig
-        return fig
+        logger.debug("Added 3D scatter plot to dashboard.")
 
-    def save_visualization(self, filepath: str):
-        """
-        Saves the current visualization to an HTML file.
+    def _add_time_series(self):
+        """Adds a time series plot for a specific factory."""
+        factory_a_data = self.data[self.data['factory_id'] == 'Factory_A']
+        self.fig.add_trace(go.Scatter(
+            x=factory_a_data['timestamp'],
+            y=factory_a_data['energy_consumption'],
+            name='Energy Consumption',
+            mode='lines',
+            line=dict(color='red')
+        ), row=2, col=2)
 
-        Args:
-            filepath: The path to save the HTML file.
-        """
+        # Create a secondary y-axis for temperature
+        self.fig.add_trace(go.Scatter(
+            x=factory_a_data['timestamp'],
+            y=factory_a_data['temperature'],
+            name='Temperature',
+            mode='lines',
+            line=dict(color='blue', dash='dash'),
+            yaxis='y2'
+        ), row=2, col=2)
+        logger.debug("Added time series plot to dashboard.")
+
+    def create_dashboard(self) -> go.Figure:
+        """Assembles all components into the final dashboard figure."""
+        logger.info("Assembling dashboard...")
+        self._add_geospatial_map()
+        self._add_correlation_heatmap()
+        self._add_3d_scatter()
+        self._add_time_series()
+
+        # Update overall layout
+        self.fig.update_layout(
+            height=800,
+            width=1200,
+            title_text="Global Manufacturing Intelligence Dashboard",
+            showlegend=False
+        )
+
+        # Update time series subplot layout
+        self.fig.update_layout(
+            yaxis2=dict(
+                title="Temperature (°C)",
+                overlaying='y',
+                side='right'
+            ),
+            xaxis4=dict(title="Timestamp"),
+            yaxis4=dict(title="Energy (kWh)")
+        )
+        logger.info("Dashboard assembly complete.")
+        return self.fig
+
+    def save_dashboard(self, filepath: str):
+        """Saves the dashboard to an interactive HTML file."""
         if self.fig:
             self.fig.write_html(filepath)
-            print(f"Visualization saved to {filepath}")
+            logger.info(f"Dashboard saved to {filepath}")
         else:
-            print("No visualization to save.")
+            logger.warning("No dashboard figure to save. Call create_dashboard() first.")
 
+async def main():
+    """Main function to generate data and create the dashboard."""
+    # Generate a rich, correlated dataset
+    sensor_data = generate_factory_sensor_data(num_factories=5, num_data_points=500)
+
+    # Create and assemble the dashboard
+    dashboard = ManufacturingDashboard(sensor_data)
+    dashboard.create_dashboard()
+
+    # Save the interactive dashboard to an HTML file
+    output_path = "manufacturing_dashboard.html"
+    dashboard.save_dashboard(output_path)
+
+    print(f"\nInteractive manufacturing dashboard has been saved to: {output_path}")
 
 if __name__ == '__main__':
-    # --- Demo of Advanced Visualization ---
-
-    # 1. Create sample data for 3D plot
-    sample_data_3d = {
-        'x': [1, 2, 3, 1, 2, 3, 1, 2, 3],
-        'y': [1, 1, 1, 2, 2, 2, 3, 3, 3],
-        'z': [1, 4, 9, 2, 5, 8, 3, 6, 7]
-    }
-    df_3d = pd.DataFrame(sample_data_3d)
-
-    # 2. Create and show 3D Surface Plot
-    viz_manager = AdvancedVisualization(df_3d)
-    fig_3d = viz_manager.plot_3d_surface('x', 'y', 'z', title="Machine Performance Surface")
-    print("Generated 3D Surface Plot. A browser window may open.")
-    # fig_3d.show() # This would open a browser window. Commented out for automated environments.
-    viz_manager.save_visualization("3d_surface_plot.html")
-
-    # 3. Create sample data for Geospatial Heatmap
-    sample_geo_data = {
-        'latitude': [34.05, 40.71, 39.95, 48.85, 51.50, 35.67],
-        'longitude': [-118.24, -74.00, -75.16, 2.35, -0.12, 139.65],
-        'intensity': [10, 50, 25, 80, 60, 40] # e.g., sensor readings or error rates
-    }
-    df_geo = pd.DataFrame(sample_geo_data)
-
-    # 4. Create and show Geospatial Heatmap
-    viz_manager.load_data(df_geo)
-    fig_geo = viz_manager.plot_geospatial_heatmap(
-        lat_col='latitude', lon_col='longitude', z_col='intensity',
-        title="Global Sensor Activity Heatmap"
-    )
-    print("Generated Geospatial Heatmap. A browser window may open.")
-    # fig_geo.show()
-    viz_manager.save_visualization("geospatial_heatmap.html")
+    asyncio.run(main())
