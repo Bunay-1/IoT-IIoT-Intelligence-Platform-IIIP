@@ -1,0 +1,28 @@
+{
+  "ethics_report": {
+    "title": "Credit Approval Model Fairness Audit",
+    "generated_at": "2026-01-13T12:50:31.837797",
+    "fairness_metrics": {},
+    "bias_detections": [
+      {
+        "disparate_impact": {
+          "ethnicity": {
+            "Group_B_vs_Group_A": 0.40634796238244514
+          }
+        }
+      }
+    ],
+    "ethical_concerns": [
+      {
+        "type": "disparate_impact",
+        "description": "Approval rate for Group_B is only 0.41 of the rate for Group_A.",
+        "severity": "high"
+      },
+      {
+        "type": "high_stakes_application",
+        "description": "Model is used for credit scoring, a high-stakes financial decision.",
+        "severity": "high"
+      }
+    ]
+  }
+}
