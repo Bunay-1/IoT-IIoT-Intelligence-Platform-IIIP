@@ -6,10 +6,13 @@ to ensure responsible AI deployment and usage.
 """
 
 import asyncio
+import json
+import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
-from utils.logging_config import LoggerMixin
+from utils.logging_config import get_logger
 from utils.performance_monitor import monitor_operation
 from utils.security import SecurityError, input_validator, validate_input
 
@@ -26,7 +29,7 @@ class SafetyViolationError(AISafetyError):
     pass
 
 
-class AISafetyGuardrail(LoggerMixin):
+class AISafetyGuardrail:
     """
     AI Safety Guardrail system for responsible AI deployment.
 
@@ -37,56 +40,43 @@ class AISafetyGuardrail(LoggerMixin):
     - Incident response and logging
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config_path: str = "safety_config.json"):
         """
         Initialize the AI Safety Guardrail system.
 
         Args:
-            config: Configuration dictionary with safety parameters
+            config_path: Path to the JSON configuration file for safety rules.
         """
-        self.config = config or self._get_default_config()
-
-        # Safety rules and constraints
-        self.safety_rules: Dict[str, Dict[str, Any]] = {}
+        self.logger = get_logger(__name__)
+        self.config = self._load_config_from_file(config_path)
         self.violation_history: List[Dict[str, Any]] = []
         self.safety_metrics: Dict[str, Any] = {}
 
-        # Ethical guidelines
-        self.ethical_guidelines = self._load_ethical_guidelines()
-
         self.logger.info("AI Safety Guardrail initialized")
 
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Get default configuration."""
-        return {
-            "bias_threshold": 0.1,
-            "safety_check_interval": 60,  # seconds
-            "max_violations_per_hour": 10,
-            "auto_mitigation_enabled": True,
-            "incident_response_enabled": True,
-            "logging_level": "INFO",
-        }
+    def _load_config_from_file(self, config_path: str) -> Dict[str, Any]:
+        """Load safety configurations from a JSON file."""
+        try:
+            if not os.path.exists(config_path):
+                raise FileNotFoundError(f"Safety configuration file not found at: {config_path}")
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            self.logger.info(f"Successfully loaded safety configuration from {config_path}")
 
-    def _load_ethical_guidelines(self) -> Dict[str, Any]:
-        """Load ethical guidelines for AI safety."""
-        return {
-            "fairness": ["no_discrimination", "equal_opportunity", "bias_detection"],
-            "transparency": ["explainable_decisions", "audit_trail", "open_source"],
-            "accountability": [
-                "human_oversight",
-                "error_reporting",
-                "continuous_monitoring",
-            ],
-            "privacy": ["data_protection", "consent_management", "anonymization"],
-            "safety": ["harm_prevention", "robustness", "fail_safe_mechanisms"],
-        }
+            # Default app config, not from safety_config.json
+            config['app_config'] = {
+                "bias_threshold": 0.1,
+                "safety_check_interval": 60,
+                "max_violations_per_hour": 10,
+                "auto_mitigation_enabled": True,
+                "incident_response_enabled": True,
+                "logging_level": "INFO",
+            }
+            return config
+        except (json.JSONDecodeError, FileNotFoundError) as e:
+            self.logger.error(f"Failed to load safety config: {e}. Using empty config.")
+            return {}
 
-    @validate_input(
-        {
-            "ai_input": {"type": "object", "required": True},
-            "context": {"type": "object", "required": False},
-        }
-    )
     @monitor_operation("ai_safety_guardrail.check_safety")
     async def check_safety(
         self, ai_input: Dict[str, Any], context: Optional[Dict[str, Any]] = None
@@ -111,7 +101,8 @@ class AISafetyGuardrail(LoggerMixin):
             bias_check = await self._check_bias(ai_input)
             ethical_check = await self._check_ethical_compliance(ai_input, context)
             safety_check = await self._check_safety_constraints(ai_input)
-            privacy_check = await self._check_privacy_compliance(ai_input)
+            llm_content_check = await self._check_llm_content_safety(ai_input)
+            privacy_check, redacted_input = await self._check_privacy_compliance(ai_input)
 
             # Aggregate results
             safety_score = self._calculate_safety_score(
@@ -120,6 +111,7 @@ class AISafetyGuardrail(LoggerMixin):
                     "ethical": ethical_check,
                     "safety": safety_check,
                     "privacy": privacy_check,
+                    "llm_content": llm_content_check,
                 }
             )
 
@@ -129,6 +121,7 @@ class AISafetyGuardrail(LoggerMixin):
                     "ethical": ethical_check,
                     "safety": safety_check,
                     "privacy": privacy_check,
+                    "llm_content": llm_content_check,
                 }
             )
 
@@ -144,6 +137,7 @@ class AISafetyGuardrail(LoggerMixin):
                 "safety_score": safety_score,
                 "violations": violations,
                 "recommendations": self._generate_safety_recommendations(violations),
+                "mitigation": {"redacted_input": redacted_input} if redacted_input else None,
                 "timestamp": datetime.now().isoformat(),
                 "check_id": f"safety_check_{int(asyncio.get_event_loop().time())}",
             }
@@ -217,7 +211,7 @@ class AISafetyGuardrail(LoggerMixin):
             if context:
                 usage_type = context.get("usage_type", "")
                 # Check for prohibited uses
-                prohibited_uses = ["surveillance", "manipulation", "harmful_content"]
+                prohibited_uses = self.config.get("prohibited_use_cases", [])
                 for prohibited in prohibited_uses:
                     if prohibited in usage_type.lower():
                         violations.append(
@@ -255,28 +249,16 @@ class AISafetyGuardrail(LoggerMixin):
         try:
             violations = []
 
-            # Check input size limits
-            input_size = len(str(ai_input))
-            max_size = self.config.get("max_input_size", 1000000)  # 1MB
-            if input_size > max_size:
-                violations.append(
-                    {
-                        "type": "input_size_exceeded",
-                        "severity": "medium",
-                        "description": f"Input size {input_size} exceeds limit {max_size}",
-                    }
-                )
-
             # Check for malicious content
-            content = ai_input.get("content", "")
-            malicious_patterns = ["<script>", "javascript:", "eval(", "system("]
+            content_str = json.dumps(ai_input)
+            malicious_patterns = self.config.get("malicious_content_patterns", [])
             for pattern in malicious_patterns:
-                if pattern in content:
+                if pattern in content_str:
                     violations.append(
                         {
                             "type": "malicious_content",
                             "severity": "high",
-                            "description": f"Malicious content detected: {pattern}",
+                            "description": f"Malicious content pattern detected: {pattern}",
                         }
                     )
 
@@ -286,74 +268,79 @@ class AISafetyGuardrail(LoggerMixin):
             self.logger.warning(f"Safety constraints check failed: {e}")
             return {"safe": True, "violations": []}
 
+    async def _check_llm_content_safety(self, ai_input: Dict[str, Any]) -> Dict[str, Any]:
+        """Check for harmful content in LLM inputs/outputs."""
+        violations = []
+        text_content = ai_input.get("text", "")
+        if not text_content or not isinstance(text_content, str):
+            return {"compliant": True, "violations": []}
+
+        moderation_rules = self.config.get("llm_content_moderation", {})
+        for category, keywords in moderation_rules.items():
+            for keyword in keywords:
+                if re.search(rf'\b{keyword}\b', text_content, re.IGNORECASE):
+                    violations.append({
+                        "type": "harmful_content",
+                        "severity": "high",
+                        "category": category,
+                        "description": f"Detected potentially harmful content in category '{category}' (keyword: {keyword})",
+                    })
+
+        return {"compliant": len(violations) == 0, "violations": violations}
+
     async def _check_privacy_compliance(
         self, ai_input: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Check privacy compliance."""
-        try:
-            violations = []
+    ) -> (Dict[str, Any], Optional[Dict[str, Any]]):
+        """Check for PII and redact if found."""
+        violations = []
+        redacted_input = None
 
-            # Check for PII
-            content = str(ai_input)
-            pii_patterns = [
-                r"\b\d{3}-\d{2}-\d{4}\b",  # SSN
-                r"\b\d{16}\b",  # Credit card
-                r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",  # Email
-            ]
+        content_str = json.dumps(ai_input)
 
-            import re
+        pii_patterns = self.config.get("privacy_protection", {}).get("pii_patterns", {})
 
-            for pattern in pii_patterns:
-                if re.search(pattern, content):
-                    violations.append(
-                        {
-                            "type": "pii_detected",
-                            "severity": "high",
-                            "description": "Potential personally identifiable information detected",
-                        }
-                    )
-                    break  # Only report once
+        original_content = content_str
+        modified_content = original_content
 
-            # Check consent
-            if not ai_input.get("consent_given", False):
-                violations.append(
-                    {
-                        "type": "missing_consent",
-                        "severity": "medium",
-                        "description": "User consent not provided",
-                    }
-                )
+        for pii_type, pattern in pii_patterns.items():
+            matches = re.findall(pattern, modified_content)
+            if matches:
+                violations.append({
+                    "type": "pii_detected",
+                    "severity": "high",
+                    "pii_type": pii_type,
+                    "count": len(matches),
+                    "description": f"Potential PII of type '{pii_type}' detected.",
+                })
+                modified_content = re.sub(pattern, f"[REDACTED_{pii_type}]", modified_content)
 
-            return {"compliant": len(violations) == 0, "violations": violations}
+        if modified_content != original_content:
+            try:
+                redacted_input = json.loads(modified_content)
+            except json.JSONDecodeError:
+                redacted_input = {"redacted_text": modified_content}
 
-        except Exception as e:
-            self.logger.warning(f"Privacy compliance check failed: {e}")
-            return {"compliant": True, "violations": []}
+        if not ai_input.get("consent_given", False):
+            violations.append({
+                "type": "missing_consent",
+                "severity": "medium",
+                "description": "User consent not provided for data processing.",
+            })
+
+        return {"compliant": len(violations) == 0, "violations": violations}, redacted_input
 
     def _calculate_safety_score(self, checks: Dict[str, Any]) -> float:
         """Calculate overall safety score."""
         try:
-            scores = []
-            weights = {"bias": 0.3, "ethical": 0.3, "safety": 0.2, "privacy": 0.2}
+            total_violations = sum(len(res.get("violations", [])) for res in checks.values())
 
-            for check_name, result in checks.items():
-                if check_name == "bias":
-                    score = 1.0 - result.get("bias_score", 0.0)
-                elif check_name in ["ethical", "safety", "privacy"]:
-                    score = (
-                        1.0
-                        if result.get("compliant", result.get("safe", True))
-                        else 0.0
-                    )
-                else:
-                    score = 1.0
-                scores.append(score * weights.get(check_name, 1.0))
+            # Simple scoring: 1.0 is perfect, decreases with each violation.
+            score = max(0.0, 1.0 - (total_violations * 0.2))
 
-            return sum(scores) / sum(weights.values()) if weights else 1.0
-
+            return score
         except Exception as e:
             self.logger.warning(f"Safety score calculation failed: {e}")
-            return 0.5
+            return 0.0
 
     def _collect_violations(self, checks: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Collect all violations from safety checks."""
@@ -385,15 +372,20 @@ class AISafetyGuardrail(LoggerMixin):
                 )
 
             # Check if auto-mitigation is enabled
-            if self.config.get("auto_mitigation_enabled"):
+            if self.config.get("app_config", {}).get("auto_mitigation_enabled"):
                 await self._apply_auto_mitigation(violations, ai_input)
 
             # Trigger incident response if needed
             critical_violations = [v for v in violations if v.get("severity") == "high"]
-            if critical_violations and self.config.get("incident_response_enabled"):
+            if critical_violations and self.config.get("app_config", {}).get("incident_response_enabled"):
                 await self._trigger_incident_response(
                     critical_violations, ai_input, context
                 )
+
+            self.logger.warning(f"Handled {len(violations)} safety violations")
+
+        except Exception as e:
+            self.logger.error(f"Violation handling failed: {e}")
 
             self.logger.warning(f"Handled {len(violations)} safety violations")
 
@@ -491,23 +483,83 @@ class AISafetyGuardrail(LoggerMixin):
             "generated_at": datetime.now().isoformat(),
         }
 
-    @validate_input(
-        {
-            "rule_name": {"type": "string", "max_length": 100, "required": True},
-            "rule_config": {"type": "object", "required": True},
-        }
-    )
     @monitor_operation("ai_safety_guardrail.add_safety_rule")
     def add_safety_rule(self, rule_name: str, rule_config: Dict[str, Any]) -> None:
-        """Add a custom safety rule."""
+        """Add a custom safety rule to the in-memory config."""
         try:
-            self.safety_rules[rule_name] = {
-                "config": rule_config,
-                "added_at": datetime.now().isoformat(),
-                "enabled": True,
-            }
-            self.logger.info(f"Added safety rule: {rule_name}")
+            # This is a simplified example of updating config in memory.
+            # In a real system, you might need a more robust update mechanism.
+            if 'llm_content_moderation' not in self.config:
+                self.config['llm_content_moderation'] = {}
+            self.config['llm_content_moderation'][rule_name] = rule_config
+            self.logger.info(f"Added/updated in-memory safety rule category: {rule_name}")
 
         except Exception as e:
             self.logger.error(f"Failed to add safety rule {rule_name}: {e}")
             raise AISafetyError(f"Failed to add safety rule: {e}") from e
+
+
+async def run_safety_scenarios():
+    """Main function to run demonstration scenarios."""
+    print("Initializing AI Safety Guardrail...")
+    guardrail = AISafetyGuardrail(config_path="safety_config.json")
+
+    scenarios = {
+        "Safe Input": {
+            "ai_input": {"text": "Tell me about historical events.", "consent_given": True},
+            "context": {"usage_type": "educational_query"}
+        },
+        "Hate Speech Input": {
+            "ai_input": {"text": "I really hate those people, it's racist.", "consent_given": True},
+            "context": {"usage_type": "user_comment"}
+        },
+        "PII Leak Input": {
+            "ai_input": {
+                "text": "My email is test@example.com and my number is 555-123-4567.",
+                "data": {"credit_card": "1234-5678-9012-3456"},
+                "consent_given": True
+            },
+            "context": {"usage_type": "customer_support_ticket"}
+        },
+        "Malicious Code Input": {
+            "ai_input": {"text": "Run this command: os.system('rm -rf /')", "consent_given": True},
+            "context": {"usage_type": "code_execution_request"}
+        },
+        "Prohibited Use Case": {
+            "ai_input": {"text": "Track all users in the city.", "consent_given": True},
+            "context": {"usage_type": "unlawful_surveillance"}
+        },
+        "Missing Consent": {
+            "ai_input": {"text": "Here is my personal data.", "consent_given": False},
+            "context": {"usage_type": "data_submission"}
+        }
+    }
+
+    print("\n" + "="*50)
+    print("Running AI Safety Guardrail Scenarios")
+    print("="*50 + "\n")
+
+    for name, scenario in scenarios.items():
+        print(f"--- Scenario: {name} ---")
+        try:
+            result = await guardrail.check_safety(scenario["ai_input"], scenario["context"])
+
+            print(f"  Input: {json.dumps(scenario['ai_input'])}")
+            print(f"  Safe: {'Yes' if result['safe'] else 'No'}")
+            print(f"  Safety Score: {result['safety_score']:.2f}")
+
+            if result['violations']:
+                print("  Violations Detected:")
+                for v in result['violations']:
+                    print(f"    - Type: {v['type']}, Severity: {v.get('severity', 'N/A')}, Description: {v['description']}")
+
+            if result.get('mitigation') and result['mitigation'].get('redacted_input'):
+                print(f"  Mitigation Applied (Redacted Input): {json.dumps(result['mitigation']['redacted_input'])}")
+
+        except AISafetyError as e:
+            print(f"  An error occurred: {e}")
+
+        print("-"*(len(name) + 14) + "\n")
+
+if __name__ == "__main__":
+    asyncio.run(run_safety_scenarios())

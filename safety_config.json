@@ -1,0 +1,36 @@
+{
+  "ethical_guidelines": {
+    "fairness": ["no_discrimination", "equal_opportunity", "bias_detection"],
+    "transparency": ["explainable_decisions", "audit_trail", "open_source"],
+    "accountability": ["human_oversight", "error_reporting", "continuous_monitoring"],
+    "privacy": ["data_protection", "consent_management", "anonymization"],
+    "safety": ["harm_prevention", "robustness", "fail_safe_mechanisms"]
+  },
+  "prohibited_use_cases": [
+    "surveillance",
+    "manipulation",
+    "unlawful_content_generation",
+    "impersonation_without_consent"
+  ],
+  "llm_content_moderation": {
+    "hate_speech": ["hate", "racist", "bigot", "kill_all"],
+    "self_harm": ["suicide", "self-harm", "kill_myself"],
+    "sexual_content": ["porn", "xxx", "naked"],
+    "violence": ["violence", "murder", "attack", "bloody"]
+  },
+  "privacy_protection": {
+    "pii_patterns": {
+      "EMAIL": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b",
+      "PHONE_NUMBER": "\\b(?:\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{3}\\)?[-\\s.]?\\d{3}[-\\s.]?\\d{4}\\b",
+      "CREDIT_CARD": "\\b(?:\\d{4}[-\\s]?){3}\\d{4}\\b",
+      "SSN": "\\b\\d{3}-\\d{2}-\\d{4}\\b"
+    }
+  },
+  "malicious_content_patterns": [
+    "<script>",
+    "javascript:",
+    "eval(",
+    "system(",
+    "os.system"
+  ]
+}
