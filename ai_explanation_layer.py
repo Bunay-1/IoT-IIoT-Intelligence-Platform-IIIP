@@ -1,188 +1,215 @@
 """
-Module: AI Explanation Layer
+Module: AI Explanation Layer using SHAP
 
-This module provides explanations for AI model decisions, making the AI system more interpretable and transparent. It generates insights into how decisions are made and why specific outcomes are produced.
+This module provides a complete, end-to-end demonstration of generating
+interpretable explanations for a machine learning model's decisions using the
+SHAP (SHapley Additive exPlanations) technique. It trains a model to predict
+customer churn and then explains individual predictions.
 """
 
-import json
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+import shap
 import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import List, Dict, Optional
 
+# Use a basic logger for this standalone example
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+class ChurnPredictionExplainer:
+    """
+    Orchestrates the process of training a churn prediction model and
+    generating SHAP explanations for its predictions.
+    """
+    def __init__(self, num_samples: int = 1000):
+        self.num_samples = num_samples
+        self.data: pd.DataFrame = None
+        self.model: RandomForestClassifier = None
+        self.explainer: shap.TreeExplainer = None
+        self.features: List[str] = []
 
-class AIExplanationLayer:
-    def __init__(self):
-        self.explanations: Dict[str, Dict[str, Any]] = {}
-        self.decision_history: List[Dict[str, Any]] = []
+        self._prepare_environment()
 
-    def explain_decision(
-        self,
-        model_name: str,
-        decision_id: str,
-        input_data: Dict[str, Any],
-        prediction: Any,
-        model_features: Optional[List[str]] = None,
-    ) -> str:
+    def _prepare_environment(self):
+        """Generates data, trains the model, and initializes the SHAP explainer."""
+        logger.info("Preparing explanation environment...")
+        self._generate_synthetic_data()
+        self._train_model()
+        self._initialize_shap_explainer()
+        logger.info("Environment ready. Model trained and SHAP explainer initialized.")
+
+    def _generate_synthetic_data(self):
         """
-        Generate an explanation for a specific decision made by an AI model.
+        Creates a synthetic dataset for a customer churn prediction scenario.
         """
-        try:
-            # Basic feature importance analysis (placeholder for SHAP/LIME integration)
-            explanation_parts = []
+        logger.info(f"Generating {self.num_samples} synthetic customer profiles...")
+        np.random.seed(42)
 
-            if model_features and isinstance(input_data, dict):
-                # Simple correlation-based explanation
-                explanation_parts.append(
-                    f"Model '{model_name}' analyzed {len(model_features)} features:"
-                )
-                for feature in model_features[:5]:  # Top 5 features
-                    if feature in input_data:
-                        value = input_data[feature]
-                        explanation_parts.append(f"  - {feature}: {value}")
+        data = {
+            'tenure': np.random.randint(1, 73, self.num_samples),
+            'monthly_charges': np.random.uniform(20, 120, self.num_samples),
+            'contract_type': np.random.choice(['Month-to-month', 'One year', 'Two year'], self.num_samples, p=[0.6, 0.2, 0.2]),
+            'total_charges': None, # Will be calculated
+            'churn': 0 # Target variable
+        }
+        self.data = pd.DataFrame(data)
 
-            explanation_parts.append(f"Prediction result: {prediction}")
-            explanation_parts.append(
-                f"Confidence factors: Input data completeness and feature correlations"
-            )
+        # Calculate total charges with some noise
+        self.data['total_charges'] = self.data['tenure'] * self.data['monthly_charges'] + np.random.uniform(-100, 100, self.num_samples)
+        self.data['total_charges'] = self.data['total_charges'].clip(lower=0)
 
-            explanation = " ".join(explanation_parts)
+        # Create a churn rule
+        # High churn for short tenure, high monthly charges, and month-to-month contracts
+        churn_probability = (
+            -0.1 * (self.data['tenure'] / 12) +
+            0.2 * (self.data['monthly_charges'] / 100) +
+            (self.data['contract_type'] == 'Month-to-month') * 0.4 +
+            np.random.normal(0, 0.1, self.num_samples) # noise
+        )
 
-            explanation_data = {
-                "decision_id": decision_id,
-                "model_name": model_name,
-                "input_data": input_data,
-                "prediction": prediction,
-                "explanation": explanation,
-                "timestamp": datetime.now().isoformat(),
-                "method": "basic_feature_analysis",
-            }
+        # Convert probability to binary churn label
+        churn_threshold = np.percentile(churn_probability, 70) # Target ~30% churn rate
+        self.data['churn'] = (churn_probability > churn_threshold).astype(int)
 
-            self.explanations[decision_id] = explanation_data
-            self.decision_history.append(explanation_data)
+        logger.info(f"Data generation complete. Churn rate: {self.data['churn'].mean():.2%}")
 
-            logger.info(f"Explanation generated for decision {decision_id}")
-            return explanation
+    def _train_model(self):
+        """Trains a RandomForestClassifier on the generated data."""
+        logger.info("Training churn prediction model...")
 
-        except Exception as e:
-            logger.error(
-                f"Error generating explanation for decision {decision_id}: {e}"
-            )
-            return f"Error generating explanation: {str(e)}"
+        # One-hot encode categorical features
+        df_processed = pd.get_dummies(self.data, columns=['contract_type'], drop_first=True)
 
-    def get_explanation(self, decision_id: str) -> Optional[Dict[str, Any]]:
+        X = df_processed.drop('churn', axis=1)
+        y = df_processed['churn']
+        self.features = X.columns.tolist()
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+        self.model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=10)
+        self.model.fit(X_train, y_train)
+
+        accuracy = self.model.score(X_test, y_test)
+        logger.info(f"Model training complete. Accuracy: {accuracy:.2%}")
+
+    def _initialize_shap_explainer(self):
+        """Initializes the SHAP explainer for the trained model."""
+        if self.model is None:
+            raise ValueError("Model must be trained before initializing the SHAP explainer.")
+
+        # SHAP's TreeExplainer is optimized for tree-based models like RandomForest
+        self.explainer = shap.TreeExplainer(self.model)
+        logger.info("SHAP TreeExplainer initialized.")
+
+    def explain_prediction(self, customer_index: int) -> Optional[Dict]:
         """
-        Retrieve the explanation for a specific decision.
+        Generates a detailed SHAP explanation for a single customer prediction.
+
+        Args:
+            customer_index: The index of the customer in the original dataframe.
+
+        Returns:
+            A dictionary containing the prediction and a human-readable explanation, or None if error.
         """
-        if decision_id in self.explanations:
-            logger.info(f"Retrieved explanation for decision {decision_id}")
-            return self.explanations[decision_id]
-        else:
-            logger.warning(f"No explanation available for decision {decision_id}")
+        if customer_index >= len(self.data):
+            logger.error(f"Customer index {customer_index} is out of bounds.")
             return None
 
-    def analyze_model_decisions(self, model_name: str) -> Dict[str, Any]:
-        """
-        Analyze the decisions made by a specific AI model to identify patterns or biases.
-        """
-        try:
-            model_decisions = [
-                d for d in self.decision_history if d["model_name"] == model_name
-            ]
+        # Prepare the specific customer's data (with one-hot encoding)
+        customer_data_raw = self.data.iloc[[customer_index]]
+        df_processed = pd.get_dummies(customer_data_raw, columns=['contract_type'], drop_first=True)
+        customer_data_encoded = df_processed.reindex(columns=self.features, fill_value=0)
 
-            if not model_decisions:
-                return {"error": f"No decisions found for model {model_name}"}
+        # Get SHAP values for this specific prediction
+        shap_values = self.explainer.shap_values(customer_data_encoded)
 
-            # Basic analysis
-            total_decisions = len(model_decisions)
-            prediction_distribution = {}
-            feature_usage = {}
+        # For binary classifiers, shap_values is a list of two arrays (one for each class).
+        # We are interested in the explanation for the "Churn" class (class 1).
+        if isinstance(shap_values, list) and len(shap_values) > 1:
+            shap_values_for_positive_class = shap_values[1]
+        else:
+            shap_values_for_positive_class = shap_values
 
-            for decision in model_decisions:
-                pred = str(decision["prediction"])
-                prediction_distribution[pred] = prediction_distribution.get(pred, 0) + 1
+        # For a binary classifier, this will have shape (num_samples, num_features, 2).
+        # We want the SHAP values for the positive class (Churn), which is at index 1.
+        shap_values_for_churn = shap_values_for_positive_class[:, :, 1]
 
-                if "input_data" in decision and isinstance(
-                    decision["input_data"], dict
-                ):
-                    for key in decision["input_data"].keys():
-                        feature_usage[key] = feature_usage.get(key, 0) + 1
+        # Since we are explaining a single prediction, we take the first row.
+        shap_values_for_churn = shap_values_for_churn[0]
 
-            analysis_results = {
-                "model_name": model_name,
-                "total_decisions": total_decisions,
-                "prediction_distribution": prediction_distribution,
-                "feature_usage": feature_usage,
-                "avg_features_per_decision": sum(
-                    len(d.get("input_data", {})) for d in model_decisions
-                )
-                / total_decisions
-                if total_decisions > 0
-                else 0,
-                "analysis_timestamp": datetime.now().isoformat(),
-            }
+        # Get the model's prediction probability
+        prediction_proba = self.model.predict_proba(customer_data_encoded)[0][1]
+        prediction_label = "Churn" if prediction_proba > 0.5 else "No Churn"
 
-            logger.info(f"Analysis completed for model {model_name}")
-            return analysis_results
+        # Create a DataFrame for easier analysis
+        feature_names = customer_data_encoded.columns
+        feature_values = customer_data_encoded.iloc[0].values
+        shap_df = pd.DataFrame({
+            'feature': feature_names,
+            'value': feature_values,
+            'shap_value': shap_values_for_churn
+        })
 
-        except Exception as e:
-            logger.error(f"Error analyzing decisions for model {model_name}: {e}")
-            return {"error": str(e)}
+        # Separate features that push the prediction towards churn (positive SHAP)
+        # from those that push it towards staying (negative SHAP)
+        positive_contributors = shap_df[shap_df['shap_value'] > 0].sort_values('shap_value', ascending=False)
+        negative_contributors = shap_df[shap_df['shap_value'] < 0].sort_values('shap_value', ascending=True)
 
-    def generate_report(self, decision_id: str) -> str:
-        """
-        Generate a detailed report for a specific decision, including context and justification.
-        """
-        try:
-            explanation = self.get_explanation(decision_id)
-            if not explanation:
-                return f"No data available for decision {decision_id}"
+        return {
+            "customer_index": customer_index,
+            "prediction_label": prediction_label,
+            "prediction_probability": prediction_proba,
+            "positive_contributors": positive_contributors.to_dict('records'),
+            "negative_contributors": negative_contributors.to_dict('records')
+        }
 
-            report = f"""
-AI Decision Report
-==================
+    def format_explanation_for_display(self, explanation: Dict) -> str:
+        """Formats the SHAP explanation into a human-readable string."""
+        report = []
+        report.append("="*50)
+        report.append(f"AI Decision Explanation for Customer #{explanation['customer_index']}")
+        report.append("="*50)
+        report.append(f"Prediction: {explanation['prediction_label']} (Probability: {explanation['prediction_probability']:.2%})")
+        report.append("\n--- Key Factors ---")
 
-Decision ID: {decision_id}
-Model: {explanation['model_name']}
-Timestamp: {explanation['timestamp']}
+        report.append("\n[+] Factors INCREASING churn risk:")
+        if not explanation['positive_contributors']:
+            report.append("  - None")
+        for item in explanation['positive_contributors'][:3]:
+            report.append(f"  - {item['feature']} = {item['value']:.2f} (Contribution: +{item['shap_value']:.3f})")
 
-Input Data:
-{json.dumps(explanation['input_data'], indent=2)}
+        report.append("\n[-] Factors DECREASING churn risk:")
+        if not explanation['negative_contributors']:
+            report.append("  - None")
+        for item in explanation['negative_contributors'][:3]:
+            report.append(f"  - {item['feature']} = {item['value']:.2f} (Contribution: {item['shap_value']:.3f})")
 
-Prediction: {explanation['prediction']}
+        report.append("\n" + "="*50)
+        return "\n".join(report)
 
-Explanation:
-{explanation['explanation']}
 
-Method Used: {explanation.get('method', 'unknown')}
+if __name__ == '__main__':
+    # Initialize the explainer system (trains model, etc.)
+    explainer_service = ChurnPredictionExplainer()
 
-Context and Justification:
-- This decision was made based on real-time analysis of input features
-- The model evaluated multiple factors to produce the prediction
-- Confidence is derived from feature completeness and historical patterns
+    # Find two interesting cases to explain: one likely to churn, one not
+    churn_probabilities = explainer_service.model.predict_proba(
+        pd.get_dummies(explainer_service.data, columns=['contract_type'], drop_first=True).drop('churn', axis=1)
+    )[:, 1]
 
-Impact Analysis:
-- Immediate action recommended based on prediction
-- Monitor related systems for confirmation
-- Log this decision for future model training
-"""
+    high_churn_risk_customer_idx = np.argmax(churn_probabilities)
+    low_churn_risk_customer_idx = np.argmin(churn_probabilities)
 
-            logger.info(f"Report generated for decision {decision_id}")
-            return report
+    # --- Case 1: High Churn Risk Customer ---
+    explanation1 = explainer_service.explain_prediction(high_churn_risk_customer_idx)
+    if explanation1:
+        print(explainer_service.format_explanation_for_display(explanation1))
 
-        except Exception as e:
-            logger.error(f"Error generating report for decision {decision_id}: {e}")
-            return f"Error generating report: {str(e)}"
+    # --- Case 2: Low Churn Risk Customer ---
+    explanation2 = explainer_service.explain_prediction(low_churn_risk_customer_idx)
+    if explanation2:
+        print(explainer_service.format_explanation_for_display(explanation2))
 
-    def get_decision_history(
-        self, model_name: Optional[str] = None, limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """
-        Get decision history, optionally filtered by model name.
-        """
-        history = self.decision_history
-        if model_name:
-            history = [d for d in history if d["model_name"] == model_name]
-
-        return history[-limit:]  # Return most recent
