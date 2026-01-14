@@ -7,3 +7,4 @@ seaborn
 pycryptodome
 numpy
 shap
+scipy
