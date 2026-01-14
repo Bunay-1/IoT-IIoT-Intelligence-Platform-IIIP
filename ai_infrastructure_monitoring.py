@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 from enum import Enum
 
 import numpy as np
+from scipy.stats import ks_2samp, linregress
 
 from utils.logging_config import get_logger
 
@@ -74,14 +75,12 @@ class AIInfrastructureMonitoring:
         # Infrastructure monitoring
         self.infrastructure_metrics: Dict[str, Dict] = defaultdict(dict)
 
-        # Alert configurations
-        self.alert_configs: Dict[str, Dict] = {}
-
         # Active alerts
         self.active_alerts: Dict[str, Dict] = {}
 
         # Optimization rules
         self.optimization_rules: Dict[str, List[Dict]] = defaultdict(list)
+        self.cooldown_timestamps: Dict[str, datetime] = {}
 
         # Historical data
         self.metrics_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=10000))
@@ -103,7 +102,8 @@ class AIInfrastructureMonitoring:
             "alert_cooldown_minutes": 5,
             "drift_detection_enabled": True,
             "auto_optimization_enabled": True,
-            "anomaly_detection_sensitivity": 0.95,
+            "anomaly_detection_sensitivity": 3.0,  # 3-sigma sensitivity
+            "anomaly_min_samples": 20, # Min samples for std dev calc
             "performance_baseline_window": 168,  # 7 days in hours
             "max_alerts_per_hour": 10,
             "enable_predictive_maintenance": True,
@@ -121,7 +121,7 @@ class AIInfrastructureMonitoring:
         Args:
             model_id: Model identifier
             model_config: Model configuration
-            monitoring_config: Monitoring configuration
+            monitoring_config: Monitoring configuration for drift, etc.
 
         Returns:
             Registration success
@@ -144,6 +144,7 @@ class AIInfrastructureMonitoring:
                 },
                 "alerts": [],
                 "drift_score": 0.0,
+                "drift_detected": False,
                 "performance_score": 1.0
             }
 
@@ -152,9 +153,6 @@ class AIInfrastructureMonitoring:
             # Initialize drift detection
             if self.config["drift_detection_enabled"]:
                 self._initialize_drift_detection(model_id, monitoring_config)
-
-            # Set up monitoring alerts
-            self._setup_model_alerts(model_id, monitoring_config)
 
             self.logger.info(f"Registered model monitoring: {model_id}")
             return True
@@ -179,37 +177,6 @@ class AIInfrastructureMonitoring:
         }
 
         self.drift_detectors[model_id] = detector
-
-    def _setup_model_alerts(self, model_id: str, monitoring_config: Optional[Dict]):
-        """Set up alerts for model monitoring."""
-        alert_config = monitoring_config.get("alerts", {}) if monitoring_config else {}
-
-        alerts = {
-            f"{model_id}_accuracy_drop": {
-                "metric": "accuracy",
-                "threshold": alert_config.get("accuracy_threshold", 0.8),
-                "operator": "lt",
-                "severity": AlertSeverity.WARNING.value,
-                "cooldown": 300
-            },
-            f"{model_id}_latency_spike": {
-                "metric": "latency",
-                "threshold": alert_config.get("latency_threshold", 1000),
-                "operator": "gt",
-                "severity": AlertSeverity.ERROR.value,
-                "cooldown": 60
-            },
-            f"{model_id}_memory_high": {
-                "metric": "memory_usage",
-                "threshold": alert_config.get("memory_threshold", 80),
-                "operator": "gt",
-                "severity": AlertSeverity.WARNING.value,
-                "cooldown": 300
-            }
-        }
-
-        for alert_name, alert_config in alerts.items():
-            self.alert_configs[alert_name] = alert_config
 
     def register_infrastructure_monitoring(
         self,
@@ -251,46 +218,12 @@ class AIInfrastructureMonitoring:
 
             self.infrastructure_metrics[component_id] = monitoring
 
-            # Set up infrastructure alerts
-            self._setup_infrastructure_alerts(component_id, monitoring_config)
-
             self.logger.info(f"Registered infrastructure monitoring: {component_id}")
             return True
 
         except Exception as e:
             self.logger.error(f"Infrastructure monitoring registration failed: {e}")
             return False
-
-    def _setup_infrastructure_alerts(self, component_id: str, monitoring_config: Optional[Dict]):
-        """Set up alerts for infrastructure monitoring."""
-        alert_config = monitoring_config.get("alerts", {}) if monitoring_config else {}
-
-        alerts = {
-            f"{component_id}_cpu_high": {
-                "metric": "cpu_usage",
-                "threshold": alert_config.get("cpu_threshold", 80),
-                "operator": "gt",
-                "severity": AlertSeverity.WARNING.value,
-                "cooldown": 300
-            },
-            f"{component_id}_memory_high": {
-                "metric": "memory_usage",
-                "threshold": alert_config.get("memory_threshold", 85),
-                "operator": "gt",
-                "severity": AlertSeverity.ERROR.value,
-                "cooldown": 300
-            },
-            f"{component_id}_disk_full": {
-                "metric": "disk_usage",
-                "threshold": alert_config.get("disk_threshold", 90),
-                "operator": "gt",
-                "severity": AlertSeverity.CRITICAL.value,
-                "cooldown": 600
-            }
-        }
-
-        for alert_name, alert_config in alerts.items():
-            self.alert_configs[alert_name] = alert_config
 
     async def record_model_metrics(
         self,
@@ -340,8 +273,8 @@ class AIInfrastructureMonitoring:
             if prediction_data and self.config["drift_detection_enabled"]:
                 await self._check_model_drift(model_id, prediction_data)
 
-            # Check alerts
-            await self._check_model_alerts(model_id, metrics)
+            # Check for anomalies
+            await self._check_for_anomalies(model_id, "model", metrics)
 
             # Update performance score
             self._update_model_performance_score(model_id)
@@ -392,8 +325,8 @@ class AIInfrastructureMonitoring:
             # Update health score
             self._update_infrastructure_health_score(component_id)
 
-            # Check alerts
-            await self._check_infrastructure_alerts(component_id, metrics)
+            # Check for anomalies
+            await self._check_for_anomalies(component_id, "infrastructure", metrics)
 
         except Exception as e:
             self.logger.error(f"Infrastructure metrics recording failed: {e}")
@@ -420,12 +353,15 @@ class AIInfrastructureMonitoring:
                 drift_score = self._calculate_drift_score(detector["reference_data"], current_window)
                 detector["drift_score"] = drift_score
                 detector["last_drift_check"] = datetime.now()
+                self.model_metrics[model_id]["drift_score"] = drift_score
 
                 if drift_score > detector["drift_threshold"]:
                     detector["drift_detected"] = True
+                    self.model_metrics[model_id]["drift_detected"] = True
                     await self._trigger_drift_alert(model_id, drift_score)
                 else:
                     detector["drift_detected"] = False
+                    self.model_metrics[model_id]["drift_detected"] = False
 
             # Update reference data periodically
             if len(detector["current_data"]) % (detector["window_size"] * 10) == 0:
@@ -435,29 +371,52 @@ class AIInfrastructureMonitoring:
             self.logger.error(f"Drift detection failed for {model_id}: {e}")
 
     def _calculate_drift_score(self, reference_data: List[Dict], current_data: List[Dict]) -> float:
-        """Calculate drift score between reference and current data."""
-        # Simplified drift calculation - in real implementation would use KS test, etc.
+        """
+        Calculate drift score using the Kolmogorov-Smirnov (K-S) test.
+        This compares the distributions of two samples.
+        The returned drift score is 1 - p-value, where a small p-value indicates
+        a significant difference between distributions.
+        """
         try:
-            # Extract numerical features (simplified)
-            ref_values = [sum(d.values()) if isinstance(d, dict) else d for d in reference_data]
-            curr_values = [sum(d.values()) if isinstance(d, dict) else d for d in current_data]
+            # We assume the prediction data is a dictionary of features
+            # For this example, we'll check drift on each feature individually
+            # and return the maximum drift score found.
 
-            if not ref_values or not curr_values:
+            if not reference_data or not current_data:
                 return 0.0
 
-            # Calculate distribution difference
-            ref_mean = statistics.mean(ref_values)
-            curr_mean = statistics.mean(curr_values)
-            ref_std = statistics.stdev(ref_values) if len(ref_values) > 1 else 0
-            curr_std = statistics.stdev(curr_values) if len(curr_values) > 1 else 0
+            # Get all feature keys from the reference data
+            if not isinstance(reference_data[0], dict):
+                 # Handle simple list of values case
+                ref_values = reference_data
+                curr_values = current_data
+                stat, p_value = ks_2samp(ref_values, curr_values)
+                return 1 - p_value
 
-            # Simple drift score based on mean and std difference
-            mean_diff = abs(ref_mean - curr_mean) / max(abs(ref_mean), 1)
-            std_diff = abs(ref_std - curr_std) / max(abs(ref_std), 1)
+            all_keys = set(reference_data[0].keys())
 
-            return min(mean_diff + std_diff, 1.0)
+            max_drift_score = 0.0
 
-        except Exception:
+            for key in all_keys:
+                ref_values = [d.get(key, 0) for d in reference_data]
+                curr_values = [d.get(key, 0) for d in current_data]
+
+                if len(ref_values) < 2 or len(curr_values) < 2:
+                    continue
+
+                # Perform the K-S test
+                try:
+                    stat, p_value = ks_2samp(ref_values, curr_values)
+                    drift_score = 1 - p_value
+                    if drift_score > max_drift_score:
+                        max_drift_score = drift_score
+                except Exception as e:
+                    self.logger.debug(f"Could not perform K-S test for feature '{key}': {e}")
+
+            return max_drift_score
+
+        except Exception as e:
+            self.logger.error(f"Error during K-S drift calculation: {e}")
             return 0.0
 
     async def _trigger_drift_alert(self, model_id: str, drift_score: float):
@@ -474,102 +433,74 @@ class AIInfrastructureMonitoring:
 
         await self._process_alert(alert)
 
-    async def _check_model_alerts(self, model_id: str, metrics: Dict[str, Union[float, int]]):
-        """Check model alerts."""
-        for alert_name, alert_config in self.alert_configs.items():
-            if not alert_name.startswith(f"{model_id}_"):
+    async def _check_for_anomalies(self, entity_id: str, entity_type: str, metrics: Dict[str, Union[float, int]]):
+        """
+        Check for anomalies in metrics using the 3-sigma rule.
+
+        Args:
+            entity_id: ID of the model or infrastructure component.
+            entity_type: 'model' or 'infrastructure'.
+            metrics: The latest metrics recorded.
+        """
+        history_key_prefix = f"model_{entity_id}" if entity_type == "model" else f"infra_{entity_id}"
+
+        for metric_name, current_value in metrics.items():
+            history_key = f"{history_key_prefix}_{metric_name}"
+            metric_history = self.metrics_history.get(history_key, [])
+
+            if len(metric_history) < self.config["anomaly_min_samples"]:
                 continue
 
-            metric_name = alert_config["metric"]
-            if metric_name not in metrics:
-                continue
+            values = [m["value"] for m in metric_history]
 
-            current_value = metrics[metric_name]
-            threshold = alert_config["threshold"]
-            operator = alert_config["operator"]
+            try:
+                mean = statistics.mean(values)
+                std_dev = statistics.stdev(values)
+            except statistics.StatisticsError:
+                continue # Not enough data to calculate stdev
 
-            # Check if alert condition met
-            alert_triggered = False
-            if operator == "gt" and current_value > threshold:
-                alert_triggered = True
-            elif operator == "lt" and current_value < threshold:
-                alert_triggered = True
-            elif operator == "eq" and current_value == threshold:
-                alert_triggered = True
+            if std_dev == 0:
+                continue # Avoid division by zero if all values are the same
 
-            if alert_triggered:
+            sensitivity = self.config["anomaly_detection_sensitivity"]
+            upper_bound = mean + sensitivity * std_dev
+            lower_bound = mean - sensitivity * std_dev
+
+            if not (lower_bound <= current_value <= upper_bound):
+                # Anomaly detected
+                alert_name = f"{entity_id}_{metric_name}_anomaly"
+
                 # Check cooldown
-                last_alert = self.active_alerts.get(alert_name)
-                if last_alert:
-                    cooldown_seconds = alert_config.get("cooldown", 300)
-                    if (datetime.now() - last_alert["timestamp"]).seconds < cooldown_seconds:
+                last_alert_time = self.cooldown_timestamps.get(alert_name)
+                if last_alert_time:
+                    cooldown_minutes = self.config["alert_cooldown_minutes"]
+                    if (datetime.now() - last_alert_time).total_seconds() < cooldown_minutes * 60:
                         continue
+                self.cooldown_timestamps[alert_name] = datetime.now()
 
-                # Trigger alert
+                message = (
+                    f"Anomaly detected for {entity_type} {entity_id}: "
+                    f"{metric_name} is {current_value:.2f}, which is outside the "
+                    f"expected range [{lower_bound:.2f}, {upper_bound:.2f}]"
+                )
+
                 alert = {
                     "alert_id": f"{alert_name}_{int(time.time())}",
-                    "type": "model_metric",
-                    "model_id": model_id,
+                    "type": f"{entity_type}_anomaly",
+                    "entity_id": entity_id,
                     "metric": metric_name,
-                    "severity": alert_config["severity"],
-                    "message": f"Model {model_id} {metric_name} {operator} {threshold} (current: {current_value})",
+                    "severity": AlertSeverity.WARNING.value,
+                    "message": message,
                     "timestamp": datetime.now(),
                     "data": {
                         "metric": metric_name,
-                        "threshold": threshold,
                         "current_value": current_value,
-                        "operator": operator
+                        "mean": mean,
+                        "std_dev": std_dev,
+                        "lower_bound": lower_bound,
+                        "upper_bound": upper_bound
                     }
                 }
-
-                await self._process_alert(alert)
-
-    async def _check_infrastructure_alerts(self, component_id: str, metrics: Dict[str, Union[float, int]]):
-        """Check infrastructure alerts."""
-        for alert_name, alert_config in self.alert_configs.items():
-            if not alert_name.startswith(f"{component_id}_"):
-                continue
-
-            metric_name = alert_config["metric"]
-            if metric_name not in metrics:
-                continue
-
-            current_value = metrics[metric_name]
-            threshold = alert_config["threshold"]
-            operator = alert_config["operator"]
-
-            # Check if alert condition met
-            alert_triggered = False
-            if operator == "gt" and current_value > threshold:
-                alert_triggered = True
-            elif operator == "lt" and current_value < threshold:
-                alert_triggered = True
-
-            if alert_triggered:
-                # Check cooldown
-                last_alert = self.active_alerts.get(alert_name)
-                if last_alert:
-                    cooldown_seconds = alert_config.get("cooldown", 300)
-                    if (datetime.now() - last_alert["timestamp"]).seconds < cooldown_seconds:
-                        continue
-
-                # Trigger alert
-                alert = {
-                    "alert_id": f"{alert_name}_{int(time.time())}",
-                    "type": "infrastructure_metric",
-                    "component_id": component_id,
-                    "metric": metric_name,
-                    "severity": alert_config["severity"],
-                    "message": f"Infrastructure {component_id} {metric_name} {operator} {threshold}% (current: {current_value}%)",
-                    "timestamp": datetime.now(),
-                    "data": {
-                        "metric": metric_name,
-                        "threshold": threshold,
-                        "current_value": current_value,
-                        "operator": operator
-                    }
-                }
-
                 await self._process_alert(alert)
 
     async def _process_alert(self, alert: Dict):
@@ -587,6 +518,92 @@ class AIInfrastructureMonitoring:
 
         # Auto-resolve after some time (simplified)
         asyncio.create_task(self._auto_resolve_alert(alert_id, 3600))  # 1 hour
+
+    async def _run_predictive_maintenance_check(self, component_id: str):
+        """
+        Runs predictive maintenance checks for an infrastructure component.
+        Uses linear regression to predict future resource usage.
+        """
+        if not self.config["enable_predictive_maintenance"]:
+            return
+
+        monitoring = self.infrastructure_metrics.get(component_id)
+        if not monitoring:
+            return
+
+        metrics_to_predict = ["cpu_usage", "memory_usage", "disk_usage"]
+
+        for metric_name in metrics_to_predict:
+            history_key = f"infra_{component_id}_{metric_name}"
+            metric_history = self.metrics_history.get(history_key)
+
+            if not metric_history or len(metric_history) < self.config["anomaly_min_samples"]:
+                continue
+
+            timestamps = np.array([m["timestamp"].timestamp() for m in metric_history])
+            values = np.array([m["value"] for m in metric_history])
+
+            # Normalize timestamps to prevent floating point issues
+            first_timestamp = timestamps[0]
+            timestamps_norm = timestamps - first_timestamp
+
+            try:
+                slope, intercept, r_value, p_value, std_err = linregress(timestamps_norm, values)
+            except ValueError:
+                continue
+
+            # Check if the trend is significant and positive (increasing)
+            if p_value < 0.05 and slope > 0:
+                # Predict when it will cross a critical threshold (e.g., 90%)
+                critical_threshold = 90.0
+
+                if values[-1] >= critical_threshold: continue # Already critical
+
+                # time = (value - intercept) / slope
+                try:
+                    time_to_threshold_seconds = (critical_threshold - intercept) / slope
+                except ZeroDivisionError:
+                    continue
+
+                predicted_breach_timestamp = first_timestamp + time_to_threshold_seconds
+                predicted_breach_datetime = datetime.fromtimestamp(predicted_breach_timestamp)
+
+                time_now = datetime.now()
+
+                # Only alert if the predicted breach is within a reasonable timeframe (e.g., 7 days)
+                if time_now < predicted_breach_datetime < time_now + timedelta(days=7):
+                    alert_name = f"{component_id}_{metric_name}_predictive_alert"
+
+                    # Check cooldown
+                    last_alert_time = self.cooldown_timestamps.get(alert_name)
+                    if last_alert_time:
+                        cooldown_minutes = self.config["alert_cooldown_minutes"] * 60 # 5 hours cooldown for predictive
+                        if (datetime.now() - last_alert_time).total_seconds() < cooldown_minutes * 60:
+                            continue
+                    self.cooldown_timestamps[alert_name] = datetime.now()
+
+                    message = (
+                        f"Predictive Alert for {component_id}: {metric_name} is trending upwards "
+                        f"and is predicted to cross {critical_threshold}% around {predicted_breach_datetime.isoformat()}."
+                    )
+
+                    alert = {
+                        "alert_id": f"{alert_name}_{int(time.time())}",
+                        "type": "predictive_maintenance",
+                        "component_id": component_id,
+                        "metric": metric_name,
+                        "severity": AlertSeverity.INFO.value,
+                        "message": message,
+                        "timestamp": time_now,
+                        "data": {
+                            "metric": metric_name,
+                            "critical_threshold": critical_threshold,
+                            "predicted_breach_datetime": predicted_breach_datetime.isoformat(),
+                            "trend_slope": slope,
+                            "r_squared": r_value**2
+                        }
+                    }
+                    await self._process_alert(alert)
 
     async def _auto_resolve_alert(self, alert_id: str, delay_seconds: int):
         """Auto-resolve alert after delay."""
@@ -765,7 +782,8 @@ class AIInfrastructureMonitoring:
             "drift_detected": monitoring.get("drift_detected", False),
             "last_updated": monitoring["last_updated"],
             "metrics": {
-                metric: len(values) for metric, values in monitoring["metrics"].items()
+                metric: len(values) if isinstance(values, list) else values
+                for metric, values in monitoring["metrics"].items()
             }
         }
 
@@ -782,7 +800,8 @@ class AIInfrastructureMonitoring:
             "health_score": monitoring["health_score"],
             "last_updated": monitoring["last_updated"],
             "metrics": {
-                metric: len(values) for metric, values in monitoring["metrics"].items()
+                metric: len(values) if isinstance(values, list) else values
+                for metric, values in monitoring["metrics"].items()
             }
         }
 
@@ -830,6 +849,10 @@ class AIInfrastructureMonitoring:
             try:
                 # Run optimization checks
                 await self.run_optimization_check()
+
+                # Run predictive maintenance checks for infrastructure
+                for component_id in self.infrastructure_metrics.keys():
+                    await self._run_predictive_maintenance_check(component_id)
 
                 # Clean up old metrics
                 cutoff_time = datetime.now() - timedelta(hours=self.config["metrics_retention_hours"])
@@ -902,3 +925,178 @@ def get_ai_monitoring_alerts() -> List[Dict]:
 def get_ai_monitoring_metrics() -> Dict:
     """Get AI monitoring metrics."""
     return ai_infrastructure_monitoring.get_monitoring_metrics()
+
+
+async def setup_simulation(monitoring: AIInfrastructureMonitoring):
+    """Set up a demo simulation environment."""
+    logger.info("Setting up simulation environment...")
+
+    # Register Models
+    monitoring.register_model_monitoring(
+        model_id="customer_churn_predictor_v1",
+        model_config={"type": "RandomForest", "version": "1.2"},
+        monitoring_config={
+            "drift_detection": {"threshold": 0.8, "window_size": 50}
+        }
+    )
+    monitoring.register_model_monitoring(
+        model_id="fraud_detection_network_v3",
+        model_config={"type": "NeuralNetwork", "version": "3.1"},
+        monitoring_config={
+            "drift_detection": {"threshold": 0.9, "window_size": 100}
+        }
+    )
+
+    # Register Infrastructure
+    monitoring.register_infrastructure_monitoring("inference_server_cluster_1", "k8s_cluster")
+    monitoring.register_infrastructure_monitoring("data_processing_pipeline_1", "kafka_stream")
+    monitoring.register_infrastructure_monitoring("model_database_1", "postgres_db")
+
+    # Add Optimization Rules
+    monitoring.add_optimization_rule(
+        "scale_up_on_high_latency",
+        conditions={"model_id": "customer_churn_predictor_v1", "performance_score_below": 0.6},
+        actions=[{"type": "scale_up", "details": {"by": 2}}]
+    )
+    monitoring.add_optimization_rule(
+        "retrain_on_drift",
+        conditions={"model_id": "fraud_detection_network_v3", "drift_detected": True},
+        actions=[{"type": "retrain_model"}]
+    )
+    monitoring.add_optimization_rule(
+        "restart_unhealthy_service",
+        conditions={"component_id": "inference_server_cluster_1", "health_score_below": 0.5},
+        actions=[{"type": "restart_service"}]
+    )
+
+    # Initialize reference data for drift detection
+    churn_model_drift_detector = monitoring.drift_detectors.get("customer_churn_predictor_v1")
+    if churn_model_drift_detector:
+        churn_model_drift_detector["reference_data"] = [
+            {"feature1": np.random.rand(), "feature2": np.random.randint(0, 100)} for _ in range(100)
+        ]
+
+    logger.info("Simulation environment setup complete.")
+
+
+async def generate_metrics(monitoring: AIInfrastructureMonitoring, iteration: int):
+    """Generate and record simulated metrics."""
+
+    # Simulate metrics for customer_churn_predictor_v1
+    churn_accuracy = 0.95 - (iteration % 20) * 0.01 # Gradual drop
+    if iteration > 40 and iteration < 45: # Anomaly
+        churn_accuracy *= 0.5
+    await monitoring.record_model_metrics(
+        "customer_churn_predictor_v1",
+        {
+            "accuracy": churn_accuracy,
+            "latency": 50 + np.random.randint(-10, 10) + (iteration % 10) * 5,
+            "cpu_usage": 30 + np.random.rand() * 5
+        },
+        prediction_data={"feature1": np.random.rand(), "feature2": np.random.randint(0, 100)}
+    )
+
+    # Simulate metrics for fraud_detection_network_v3, including data drift
+    fraud_latency = 120 + np.random.randint(-20, 20)
+    prediction_features = {"card_type": np.random.rand() * 10, "amount": np.random.rand() * 1000}
+    if iteration > 60: # Introduce drift
+        prediction_features["amount"] *= 1.5
+    await monitoring.record_model_metrics(
+        "fraud_detection_network_v3",
+        {"accuracy": 0.98, "latency": fraud_latency, "memory_usage": 60 + np.random.rand() * 10},
+        prediction_data=prediction_features
+    )
+
+    # Simulate infrastructure metrics
+    # Normal usage with a gradual increase for predictive maintenance test
+    cpu_usage = 40 + np.random.rand() * 5 + (iteration * 0.1)
+    # Anomaly spike
+    if 30 < iteration < 35:
+        cpu_usage = 95.0
+    await monitoring.record_infrastructure_metrics(
+        "inference_server_cluster_1",
+        {"cpu_usage": cpu_usage, "memory_usage": 55 + np.random.rand() * 3, "error_rate": np.random.rand() * 0.01}
+    )
+
+    # Simulate disk usage increase for predictive maintenance
+    disk_usage = 70 + (iteration * 0.05)
+    await monitoring.record_infrastructure_metrics(
+        "model_database_1",
+        {"disk_usage": disk_usage, "response_time": 10 + np.random.rand()}
+    )
+
+
+async def display_dashboard(monitoring: AIInfrastructureMonitoring):
+    """Display a simple text-based dashboard."""
+    print("\033[2J\033[H")  # Clear screen
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"--- AI Infrastructure Monitoring Dashboard --- ({now})")
+
+    # Overall Status
+    overall_metrics = monitoring.get_monitoring_metrics()
+    print("\n--- Overall Status ---")
+    print(
+        f"Models Monitored: {overall_metrics['total_models']} | "
+        f"Infra Components: {overall_metrics['total_components']} | "
+        f"Active Alerts: {overall_metrics['active_alerts']}"
+    )
+    print(
+        f"Avg Model Perf: {overall_metrics['avg_model_performance']:.2f} | "
+        f"Avg Infra Health: {overall_metrics['avg_infrastructure_health']:.2f} | "
+        f"Models w/ Drift: {overall_metrics['models_with_drift']}"
+    )
+
+    # Model Status
+    print("\n--- Model Status ---")
+    for model_id in monitoring.model_metrics.keys():
+        status = monitoring.get_model_status(model_id)
+        if status:
+            drift_str = "DETECTED" if status.get('drift_detected') else f"{status.get('drift_score', 0):.2f}"
+            print(f"  - {model_id:<30} | Perf Score: {status['performance_score']:.2f} | Drift Score: {drift_str}")
+
+    # Infrastructure Status
+    print("\n--- Infrastructure Status ---")
+    for comp_id in monitoring.infrastructure_metrics.keys():
+        status = monitoring.get_infrastructure_status(comp_id)
+        if status:
+            print(f"  - {comp_id:<30} | Health Score: {status['health_score']:.2f}")
+
+    # Active Alerts
+    alerts = monitoring.get_active_alerts()
+    if alerts:
+        print("\n--- Active Alerts ---")
+        for alert in alerts:
+            entity = alert.get('model_id') or alert.get('component_id') or alert.get('entity_id', 'N/A')
+            print(f"  - [{alert['timestamp'].strftime('%H:%M:%S')}] [{alert['severity'].upper()}] [{alert['type']}] {entity}: {alert['message']}")
+
+    print("\n" + "-"*50)
+
+
+async def main():
+    """Main function to run the simulation."""
+    monitoring = AIInfrastructureMonitoring()
+
+    # Start the background monitoring task
+    monitoring_task = asyncio.create_task(monitoring.continuous_monitoring())
+
+    # Set up the simulation entities
+    await setup_simulation(monitoring)
+
+    # Run the simulation loop
+    for i in range(80): # Run for 80 iterations
+        await generate_metrics(monitoring, i)
+        await display_dashboard(monitoring)
+        await asyncio.sleep(2)
+
+    monitoring_task.cancel()
+    try:
+        await monitoring_task
+    except asyncio.CancelledError:
+        logger.info("Monitoring task successfully cancelled.")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Simulation stopped by user.")
