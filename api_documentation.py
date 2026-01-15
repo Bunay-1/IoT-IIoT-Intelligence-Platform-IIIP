@@ -1,293 +1,219 @@
 """
-Enhanced API documentation with OpenAPI extensions
+API Documentation Generator
+
+A comprehensive tool for generating various API documentation formats from a FastAPI application,
+including OpenAPI schemas, Postman collections, and Markdown files.
 """
 
 import json
-from typing import Any, Dict
-
+import argparse
+from typing import Any, Dict, List
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+class APIDocumentationGenerator:
+    """
+    Generates API documentation from a FastAPI application instance.
+    """
+    def __init__(self, app: FastAPI, base_url: str = "http://127.0.0.1:8000"):
+        self.app = app
+        self.base_url = base_url
+        self.openapi_schema: Dict[str, Any] = {}
 
-def customize_openapi(app: FastAPI) -> Dict[str, Any]:
-    """Customize OpenAPI schema with additional information."""
+    def generate_openapi_schema(self) -> Dict[str, Any]:
+        """Generate and customize the OpenAPI schema."""
+        if self.app.openapi_schema:
+            self.openapi_schema = self.app.openapi_schema
+            return self.openapi_schema
 
-    if app.openapi_schema:
-        return app.openapi_schema
+        openapi_schema = get_openapi(
+            title=self.app.title,
+            version=self.app.version,
+            description=self._get_api_description(),
+            routes=self.app.routes,
+        )
 
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=get_api_description(),
-        routes=app.routes,
-    )
-
-    # Add security schemes
-    openapi_schema["components"]["securitySchemes"] = {
-        "BearerAuth": {
-            "type": "http",
-            "scheme": "bearer",
-            "bearerFormat": "JWT",
-            "description": "JWT Authorization header using the Bearer scheme.",
+        # Add security schemes
+        if "components" not in openapi_schema:
+            openapi_schema["components"] = {}
+        openapi_schema["components"]["securitySchemes"] = {
+            "BearerAuth": {
+                "type": "http", "scheme": "bearer", "bearerFormat": "JWT",
+                "description": "JWT Authorization header using the Bearer scheme.",
+            }
         }
-    }
+        openapi_schema["security"] = [{"BearerAuth": []}]
+        openapi_schema["tags"] = self._get_api_tags()
 
-    # Apply security globally
-    openapi_schema["security"] = [{"BearerAuth": []}]
+        self.app.openapi_schema = openapi_schema
+        self.openapi_schema = openapi_schema
+        return openapi_schema
 
-    # Add custom tags
-    openapi_schema["tags"] = get_api_tags()
+    def generate_postman_collection(self) -> Dict[str, Any]:
+        """Generate a Postman collection from the OpenAPI schema."""
+        if not self.openapi_schema:
+            self.generate_openapi_schema()
 
-    # Add custom examples
-    add_request_examples(openapi_schema)
+        collection = {
+            "info": {
+                "name": self.app.title,
+                "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+                "description": self.openapi_schema.get("info", {}).get("description", ""),
+            },
+            "item": [],
+        }
 
-    # Add response examples
-    add_response_examples(openapi_schema)
+        for path, path_item in self.openapi_schema.get("paths", {}).items():
+            for method, operation in path_item.items():
+                request = {
+                    "method": method.upper(),
+                    "header": [{"key": "Authorization", "value": "Bearer {{JWT_TOKEN}}"}],
+                    "url": {"raw": f"{self.base_url}{path}", "host": [self.base_url], "path": path.strip('/').split('/')},
+                    "description": operation.get("summary", ""),
+                }
 
-    # Add custom extensions
-    openapi_schema["x-api-version"] = app.version
-    openapi_schema["x-rate-limit"] = "10 requests per second"
-    openapi_schema["x-contact"] = {
-        "name": "IoT Platform Support",
-        "email": "support@iot-platform.com",
-        "url": "https://iot-platform.com/support",
-    }
+                # Add request body if present
+                if "requestBody" in operation:
+                    content = operation["requestBody"]["content"].get("application/json", {})
+                    if "schema" in content:
+                        request["body"] = {"mode": "raw", "raw": json.dumps(self._get_example_from_schema(content["schema"]), indent=2)}
+                        request["header"].append({"key": "Content-Type", "value": "application/json"})
 
-    app.openapi_schema = openapi_schema
-    return openapi_schema
+                collection["item"].append({"name": operation.get("summary", path), "request": request, "response": []})
 
+        return collection
 
-def get_api_description() -> str:
-    """Get comprehensive API description."""
-    return """
-# IoT IIoT Intelligence Platform API
+    def generate_markdown_docs(self) -> str:
+        """Generate Markdown documentation from the OpenAPI schema."""
+        if not self.openapi_schema:
+            self.generate_openapi_schema()
 
+        md = f"# {self.app.title} - API Documentation\n\n"
+        md += f"{self.openapi_schema.get('info', {}).get('description', '')}\n\n"
+
+        for path, path_item in self.openapi_schema.get("paths", {}).items():
+            for method, operation in path_item.items():
+                md += f"## {operation.get('summary', path)}\n\n"
+                md += f"`{method.upper()} {path}`\n\n"
+                md += f"{operation.get('description', '')}\n\n"
+
+                # Request
+                if "requestBody" in operation:
+                    md += "### Request Body\n\n"
+                    content = operation["requestBody"]["content"].get("application/json", {})
+                    if "schema" in content:
+                        example = self._get_example_from_schema(content["schema"])
+                        md += "```json\n"
+                        md += json.dumps(example, indent=2) + "\n"
+                        md += "```\n\n"
+
+                # Curl Example
+                md += "### cURL Example\n\n"
+                md += "```bash\n"
+                md += f"curl -X {method.upper()} '{self.base_url}{path}' \\\n"
+                md += "     -H 'Authorization: Bearer YOUR_JWT_TOKEN' \\\n"
+                md += "     -H 'Content-Type: application/json'"
+                if "requestBody" in operation:
+                    example = self._get_example_from_schema(operation["requestBody"]["content"]["application/json"]["schema"])
+                    md += " \\\n     -d '" + json.dumps(example) + "'\n"
+                else:
+                    md += "\n"
+                md += "```\n\n"
+
+        return md
+
+    def _get_example_from_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate a dictionary example from a JSON schema."""
+        if "example" in schema:
+            return schema["example"]
+        if "properties" in schema:
+            example = {}
+            for prop_name, prop_details in schema["properties"].items():
+                if "example" in prop_details:
+                    example[prop_name] = prop_details["example"]
+                elif "type" in prop_details:
+                    example[prop_name] = f"({prop_details['type']})"
+            return example
+        return {}
+
+    def _get_api_description(self) -> str:
+        """Get comprehensive API description."""
+        # This function is kept for clarity
+        return """
 A comprehensive REST API for IoT and IIoT applications providing real-time monitoring, predictive analytics, and intelligent automation.
-
-## Features
-
-- **Real-time Monitoring**: WebSocket connections for live data streaming
-- **Predictive Analytics**: AI-powered anomaly detection and forecasting
-- **Authentication**: JWT-based secure authentication with role-based access
-- **Rate Limiting**: Built-in protection against abuse
-- **Comprehensive Monitoring**: Prometheus metrics and health checks
-- **Multi-tenancy**: Support for multiple organizations and users
-
-## Authentication
-
-All API endpoints require authentication using JWT tokens. Include the token in the Authorization header:
-
-```
-Authorization: Bearer <your_jwt_token>
-```
-
-## Rate Limits
-
-- General API: 10 requests/second
-- Authentication endpoints: 5 requests/second
-- WebSocket connections: 1000 messages/minute
-
-## Response Format
-
-All responses follow a consistent format:
-
-```json
-{
-  "data": {},
-  "meta": {
-    "timestamp": "2025-12-12T12:00:00Z",
-    "request_id": "req-123"
-  }
-}
-```
-
-## Error Handling
-
-Errors are returned with appropriate HTTP status codes and detailed messages:
-
-```json
-{
-  "detail": "Error description",
-  "type": "error_type",
-  "code": "ERROR_CODE"
-}
-```
 """
 
-
-def get_api_tags() -> list:
-    """Get API tags for organization."""
-    return [
-        {
-            "name": "Authentication",
-            "description": "User authentication and authorization endpoints",
-            "externalDocs": {
-                "description": "Authentication Guide",
-                "url": "https://docs.iot-platform.com/auth",
-            },
-        },
-        {
-            "name": "Machines",
-            "description": "Machine management and monitoring",
-            "externalDocs": {
-                "description": "Machine Management",
-                "url": "https://docs.iot-platform.com/machines",
-            },
-        },
-        {
-            "name": "Analytics",
-            "description": "Data analytics and reporting",
-            "externalDocs": {
-                "description": "Analytics Guide",
-                "url": "https://docs.iot-platform.com/analytics",
-            },
-        },
-        {
-            "name": "Alerts",
-            "description": "Alert management and notifications",
-            "externalDocs": {
-                "description": "Alert System",
-                "url": "https://docs.iot-platform.com/alerts",
-            },
-        },
-        {
-            "name": "WebSocket",
-            "description": "Real-time data streaming",
-            "externalDocs": {
-                "description": "WebSocket API",
-                "url": "https://docs.iot-platform.com/websocket",
-            },
-        },
-    ]
+    def _get_api_tags(self) -> List[Dict[str, Any]]:
+        """Get API tags for organization."""
+        # This function is kept for clarity
+        return [{"name": "Machines", "description": "Manage and monitor machines."}]
 
 
-def add_request_examples(openapi_schema: Dict[str, Any]):
-    """Add request examples to OpenAPI schema."""
-    if "paths" not in openapi_schema:
-        return
+def main():
+    """CLI for the documentation generator."""
+    parser = argparse.ArgumentParser(description="API Documentation Generator for FastAPI.")
+    parser.add_argument(
+        "format",
+        choices=["openapi", "postman", "markdown"],
+        help="The format of the documentation to generate."
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        default="docs",
+        help="Output directory or file name prefix."
+    )
+    args = parser.parse_args()
 
-    # Add examples for machine creation
-    if "/api/v1/machines" in openapi_schema["paths"]:
-        machine_example = {
-            "machine_id": "CNC-001",
-            "name": "CNC Milling Machine Alpha",
-            "location": "Factory Floor A",
-            "model": "DMG Mori DMU 50",
-            "installation_date": "2023-01-15T00:00:00Z",
-            "status": "active",
-            "metadata": {
-                "manufacturer": "DMG Mori",
-                "serial_number": "DMU50-2023-001",
-                "power_rating": "15kW",
-            },
-        }
+    # --- Demo FastAPI Application ---
+    # In a real project, this app would be imported from your main application file.
+    from pydantic import BaseModel, Field
+    from datetime import datetime
 
-        if "post" in openapi_schema["paths"]["/api/v1/machines"]:
-            openapi_schema["paths"]["/api/v1/machines"]["post"]["requestBody"][
-                "content"
-            ]["application/json"]["examples"] = {
-                "new_machine": {
-                    "summary": "Create a new CNC machine",
-                    "value": machine_example,
-                }
-            }
+    app = FastAPI(
+        title="IoT Intelligence Platform API",
+        version="2.0.0",
+        description="A demo API for the documentation generator."
+    )
 
+    class Machine(BaseModel):
+        machine_id: str = Field(..., example="CNC-001")
+        name: str = Field(..., example="CNC Milling Machine Alpha")
+        status: str = Field("active", example="active")
+        installation_date: datetime = Field(default_factory=datetime.now)
 
-def add_response_examples(openapi_schema: Dict[str, Any]):
-    """Add response examples to OpenAPI schema."""
-    if "paths" not in openapi_schema:
-        return
+    @app.post("/api/v1/machines", tags=["Machines"], summary="Create a new machine")
+    def create_machine(machine: Machine):
+        return {"status": "success", "data": machine}
 
-    # Add examples for machine responses
-    if "/api/v1/machines" in openapi_schema["paths"]:
-        machine_response_example = [
-            {
-                "machine_id": "CNC-001",
-                "name": "CNC Milling Machine Alpha",
-                "location": "Factory Floor A",
-                "model": "DMG Mori DMU 50",
-                "installation_date": "2023-01-15T00:00:00Z",
-                "last_maintenance": "2024-06-01T00:00:00Z",
-                "status": "active",
-                "open_alerts": 0,
-                "metadata": {"manufacturer": "DMG Mori", "power_rating": "15kW"},
-            }
-        ]
+    @app.get("/api/v1/machines", tags=["Machines"], summary="List all machines")
+    def list_machines():
+        return {"data": []}
 
-        if "get" in openapi_schema["paths"]["/api/v1/machines"]:
-            openapi_schema["paths"]["/api/v1/machines"]["get"]["responses"]["200"][
-                "content"
-            ]["application/json"]["examples"] = {
-                "machine_list": {
-                    "summary": "List of machines",
-                    "value": machine_response_example,
-                }
-            }
+    # --- Generator ---
+    generator = APIDocumentationGenerator(app)
 
+    if args.format == "openapi":
+        schema = generator.generate_openapi_schema()
+        file_path = f"{args.output}_openapi.json"
+        with open(file_path, "w") as f:
+            json.dump(schema, f, indent=2)
+        print(f"OpenAPI schema saved to {file_path}")
 
-def generate_api_docs():
-    """Generate API documentation files."""
-    # This could generate markdown docs, Postman collections, etc.
-    docs = {
-        "openapi_version": "3.0.0",
-        "title": "IoT IIoT Intelligence Platform API",
-        "version": "1.0.0",
-        "description": "Complete API documentation",
-        "endpoints": [
-            {
-                "path": "/api/v1/auth/login",
-                "method": "POST",
-                "description": "User login",
-            },
-            {
-                "path": "/api/v1/machines",
-                "method": "GET",
-                "description": "List machines",
-            },
-            {
-                "path": "/api/v1/machines",
-                "method": "POST",
-                "description": "Create machine",
-            },
-            {
-                "path": "/api/v1/analytics/overview",
-                "method": "GET",
-                "description": "Analytics overview",
-            },
-            {"path": "/metrics", "method": "GET", "description": "Prometheus metrics"},
-            {"path": "/health", "method": "GET", "description": "Health check"},
-        ],
-    }
+    elif args.format == "postman":
+        collection = generator.generate_postman_collection()
+        file_path = f"{args.output}_postman_collection.json"
+        with open(file_path, "w") as f:
+            json.dump(collection, f, indent=2)
+        print(f"Postman collection saved to {file_path}")
 
-    return docs
+    elif args.format == "markdown":
+        markdown = generator.generate_markdown_docs()
+        file_path = f"{args.output}_docs.md"
+        with open(file_path, "w") as f:
+            f.write(markdown)
+        print(f"Markdown documentation saved to {file_path}")
 
 
-# API documentation templates
-API_TEMPLATES = {
-    "error_response": {
-        "description": "Error response format",
-        "content": {
-            "application/json": {
-                "example": {
-                    "detail": "Error description",
-                    "type": "error_type",
-                    "code": "ERROR_CODE",
-                }
-            }
-        },
-    },
-    "success_response": {
-        "description": "Success response format",
-        "content": {
-            "application/json": {
-                "example": {
-                    "data": {},
-                    "meta": {
-                        "timestamp": "2025-12-12T12:00:00Z",
-                        "request_id": "req-123",
-                    },
-                }
-            }
-        },
-    },
-}
+if __name__ == "__main__":
+    main()
