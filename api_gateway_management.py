@@ -10,10 +10,13 @@ import hashlib
 import json
 import time
 import uuid
+import re
+import aiohttp
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple, Union, Callable
 from enum import Enum
+from aiohttp import web
 
 from utils.logging_config import get_logger
 
@@ -104,6 +107,9 @@ class APIGatewayManagement:
         # Load balancing
         self.load_balancers: Dict[str, Dict] = {}
 
+        # Caching
+        self.cache: Dict[str, Tuple[datetime, Dict]] = {}
+
         self.logger = get_logger(__name__)
         self.logger.info("API Gateway Management initialized")
 
@@ -164,10 +170,6 @@ class APIGatewayManagement:
             }
 
             self.routes[route_id] = route
-
-            # Add to path-based index for faster lookup
-            if route_path not in self.routes:
-                self.routes[route_path] = route
 
             self.logger.info(f"Added route: {methods} {route_path} -> {upstream_service}")
             return True
@@ -396,6 +398,17 @@ class APIGatewayManagement:
             if not route.get("enabled", True):
                 return self._create_response(403, {"error": "Route disabled"})
 
+            # Caching check
+            cache_key = None
+            if route.get("caching_enabled"):
+                cache_key = self._get_cache_key(method, path, headers, body)
+                cached_response = self._get_from_cache(cache_key, route)
+                if cached_response:
+                    self.logger.info(f"Cache hit for request {request_id}")
+                    # We still record a metric for cached responses
+                    await self._record_request_metrics(request_id, route, cached_response, time.time() - start_time)
+                    return cached_response
+
             # Authentication
             if route.get("auth_required"):
                 auth_result = await self._authenticate_request(headers, route)
@@ -415,13 +428,17 @@ class APIGatewayManagement:
             transformed_request = await self._transform_request(route, body, headers, query_params)
 
             # Route to upstream service
-            upstream_response = await self._route_to_upstream(route, transformed_request, headers)
+            upstream_response = await self._route_to_upstream(route, transformed_request, headers, path)
 
             # Response transformation
             transformed_response = await self._transform_response(route, upstream_response)
 
             # Record metrics
             await self._record_request_metrics(request_id, route, upstream_response, time.time() - start_time)
+
+            # Cache the response if enabled
+            if route.get("caching_enabled") and cache_key:
+                self._add_to_cache(cache_key, transformed_response, route)
 
             return transformed_response
 
@@ -430,23 +447,29 @@ class APIGatewayManagement:
             return self._create_response(500, {"error": "Internal server error"})
 
     def _find_route(self, method: str, path: str) -> Optional[Dict]:
-        """Find matching route for request."""
-        # Simple route matching - in real implementation would use more sophisticated routing
-        for route_id, route in self.routes.items():
-            if isinstance(route_id, str) and not route_id.startswith("route_"):
+        """Find matching route for request using regex for path parameters."""
+        for route in self.routes.values():
+            if method.upper() not in route["methods"]:
                 continue
 
-            if route["path"] == path and method.upper() in route["methods"]:
+            # Convert path template to regex
+            # e.g., /users/{id} -> /users/(?P<id>[^/]+)
+            path_regex = re.sub(r"{([^/]+)}", r"(?P<\1>[^/]+)", route["path"]) + '$'
+
+            match = re.fullmatch(path_regex, path)
+            if match:
                 return route
 
         return None
 
     async def _authenticate_request(self, headers: Dict, route: Dict) -> Dict:
         """Authenticate API request."""
-        auth_method = route.get("auth_method", "api_key")
+        auth_method = route.get("auth_method") or "api_key"
 
         if auth_method == "api_key":
-            api_key = headers.get("X-API-Key") or headers.get("Authorization", "").replace("Bearer ", "")
+            # Handle case-insensitivity of headers
+            api_key = headers.get("x-api-key") or headers.get("X-API-Key") or headers.get("Authorization", "").replace("Bearer ", "")
+
             if not api_key:
                 return {"success": False, "error": "API key required"}
 
@@ -555,7 +578,7 @@ class APIGatewayManagement:
             "query_params": transformed_params
         }
 
-    async def _route_to_upstream(self, route: Dict, request_data: Dict, headers: Dict) -> Dict:
+    async def _route_to_upstream(self, route: Dict, request_data: Dict, headers: Dict, path: str) -> Dict:
         """Route request to upstream service."""
         upstream_service = route["upstream_service"]
         services = self.upstream_services.get(upstream_service, [])
@@ -572,7 +595,7 @@ class APIGatewayManagement:
 
         try:
             # Forward request to upstream service
-            upstream_response = await self._forward_request(service, route, request_data, headers)
+            upstream_response = await self._forward_request(service, route, request_data, headers, path)
 
             # Update circuit breaker success
             self._record_circuit_breaker_success(service)
@@ -636,26 +659,32 @@ class APIGatewayManagement:
         if cb["failure_count"] >= cb["failure_threshold"]:
             cb["state"] = "open"
 
-    async def _forward_request(self, service: Dict, route: Dict, request_data: Dict, headers: Dict) -> Dict:
-        """Forward request to upstream service."""
-        # In real implementation, would make actual HTTP request to upstream service
-        # For demo, simulate response
+    async def _forward_request(self, service: Dict, route: Dict, request_data: Dict, headers: Dict, path: str) -> Dict:
+        """Forward request to upstream service using aiohttp."""
+        target_url = f"{service['url']}{path}"
 
-        await asyncio.sleep(0.01)  # Simulate network latency
+        # Filter headers to avoid sending gateway-specific headers upstream
+        forward_headers = {k: v for k, v in headers.items() if k.lower() not in ['host', 'x-api-key']}
+        forward_headers['X-Forwarded-For'] = headers.get('X-Forwarded-For', 'unknown')
 
-        # Simulate response based on route
-        if route["path"].endswith("/users"):
-            response_body = {"users": [{"id": 1, "name": "John Doe"}]}
-        elif route["path"].endswith("/data"):
-            response_body = {"data": [1, 2, 3, 4, 5]}
-        else:
-            response_body = {"message": f"Response from {service['name']}"}
-
-        return {
-            "status_code": 200,
-            "headers": {"Content-Type": "application/json"},
-            "body": response_body
-        }
+        try:
+            async with aiohttp.ClientSession(headers=forward_headers) as session:
+                async with session.request(
+                    method=route['methods'][0], # Assuming one method for simplicity
+                    url=target_url,
+                    params=request_data.get("query_params"),
+                    data=request_data.get("body"),
+                    timeout=service['timeout']
+                ) as response:
+                    response_body = await response.json()
+                    return {
+                        "status_code": response.status,
+                        "headers": dict(response.headers),
+                        "body": response_body
+                    }
+        except aiohttp.ClientError as e:
+            self.logger.error(f"Upstream request failed for {service['name']}: {e}")
+            return {"status_code": 502, "body": {"error": "Bad Gateway", "details": str(e)}}
 
     async def _transform_response(self, route: Dict, response: Dict) -> Dict:
         """Transform response before returning to client."""
@@ -731,23 +760,20 @@ class APIGatewayManagement:
                 await asyncio.sleep(30)
 
     async def _health_check_service(self, service: Dict):
-        """Health check individual service."""
+        """Health check individual service by making a real HTTP request."""
         health_url = service.get("health_check_url")
         if not health_url:
-            # Assume healthy if no health check URL
-            service["status"] = "healthy"
+            service["status"] = "healthy" # Assume healthy if no health check URL
             return
 
         try:
-            # In real implementation, would make actual health check request
-            await asyncio.sleep(0.001)  # Simulate quick check
-
-            # Simulate health status
-            import random
-            is_healthy = random.random() > 0.05  # 95% healthy
-
-            service["status"] = "healthy" if is_healthy else "unhealthy"
-
+            async with aiohttp.ClientSession() as session:
+                async with session.get(health_url, timeout=5) as response:
+                    if response.status >= 200 and response.status < 300:
+                        service["status"] = "healthy"
+                    else:
+                        service["status"] = "unhealthy"
+                        self.logger.warning(f"Health check failed for {service['name']} with status {response.status}")
         except Exception as e:
             self.logger.error(f"Health check failed for {service['name']}: {e}")
             service["status"] = "unhealthy"
@@ -822,60 +848,191 @@ class APIGatewayManagement:
             for service_name, services in self.upstream_services.items()
         }
 
+    # --- Caching Methods ---
+    def _get_cache_key(self, method: str, path: str, headers: Dict, body: Optional[bytes]) -> str:
+        """Generate a cache key for a request."""
+        key_parts = f"{method}:{path}"
+        # In a real system, you might vary on specific headers
+        if body:
+            key_parts += ":" + hashlib.md5(body).hexdigest()
+        return key_parts
 
-# Global API gateway instance
-api_gateway = APIGatewayManagement()
+    def _add_to_cache(self, key: str, response: Dict, route: Dict):
+        """Add a response to the cache."""
+        ttl = timedelta(seconds=route.get("cache_ttl", 300))
+        expiration = datetime.now() + ttl
+        self.cache[key] = (expiration, response)
+        self.logger.info(f"Cached response for key: {key} with TTL: {ttl.seconds}s")
+
+    def _get_from_cache(self, key: str, route: Dict) -> Optional[Dict]:
+        """Retrieve a response from the cache if it's valid."""
+        if key in self.cache:
+            expiration, response = self.cache[key]
+            if datetime.now() < expiration:
+                return response
+            else:
+                # Cache expired
+                del self.cache[key]
+        return None
+
+    # --- Server Methods ---
+    async def _handle_request(self, request: web.Request) -> web.Response:
+        """Main handler for all incoming aiohttp requests."""
+        body = await request.read()
+        response_data = await self.process_request(
+            method=request.method,
+            path=request.path,
+            headers={k.lower(): v for k, v in request.headers.items()},
+            body=body if body else None,
+            query_params=dict(request.query),
+            client_ip=request.remote
+        )
+
+        # aiohttp's json_response sets Content-Type automatically.
+        # We should remove it from our headers if it exists to avoid conflict.
+        response_headers = response_data.get("headers", {})
+        if 'Content-Type' in response_headers:
+            del response_headers['Content-Type']
+
+        return web.json_response(
+            data=response_data.get("body"),
+            status=response_data.get("status_code", 500),
+            headers=response_headers
+        )
+
+    async def run_server(self):
+        """Run the aiohttp web server."""
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", self._handle_request)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self.config["host"], self.config["port"])
+
+        await self.start_gateway()
+        self.config["start_time"] = datetime.now()
+
+        logger.info(f"API Gateway server running on http://{self.config['host']}:{self.config['port']}")
+        await site.start()
+
+        # Keep server running until stopped
+        while self.gateway_status == GatewayStatus.RUNNING:
+            await asyncio.sleep(1)
+
+        await runner.cleanup()
 
 
-def add_api_route(
-    route_path: str,
-    methods: List[str],
-    upstream_service: str,
-    route_config: Optional[Dict] = None
-) -> bool:
-    """Add API route."""
-    return api_gateway.add_route(route_path, methods, upstream_service, route_config)
+if __name__ == "__main__":
+    import argparse
+    import subprocess
+
+    async def run_dummy_service(port: int, name: str, health_endpoint: bool = False):
+        """Runs a simple aiohttp service to act as an upstream target."""
+        app = web.Application()
+
+        async def handle(request):
+            return web.json_response({"message": f"Response from {name}", "port": port})
+
+        async def handle_health(request):
+            return web.json_response({"status": "ok"})
+
+        app.router.add_get("/{path:.*}", handle)
+        if health_endpoint:
+            app.router.add_get("/health", handle_health)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '127.0.0.1', port)
+        await site.start()
+        logger.info(f"Dummy service '{name}' running on http://127.0.0.1:{port}")
+
+        # Keep it running
+        while True:
+            await asyncio.sleep(3600)
+
+    async def run_tests():
+        """Runs a series of curl commands to test the gateway."""
+        await asyncio.sleep(2) # Give servers time to start
+        logger.info("\n--- Running Integration Tests ---")
+
+        tests = [
+            ("Test 1: Valid request to user service", "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/users/123", "200"),
+            ("Test 2: Valid request to data service with API key", "curl -s -o /dev/null -w '%{http_code}' -H 'X-API-Key: test-key' http://127.0.0.1:8080/data", "200"),
+            ("Test 3: Missing API key for protected route", "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/data", "401"),
+            ("Test 4: Rate limit test (3 requests, 2 should pass, 1 fail)", "", "")
+        ]
+
+        for desc, cmd, expected in tests:
+            logger.info(f"[TEST] {desc}")
+            if cmd:
+                process = await asyncio.create_subprocess_shell(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                stdout, _ = await process.communicate()
+                status_code = stdout.decode().strip()
+                if status_code == expected:
+                    logger.info(f"  -> PASSED (Expected {expected}, Got {status_code})")
+                else:
+                    logger.error(f"  -> FAILED (Expected {expected}, Got {status_code})")
+
+            if "Rate limit" in desc:
+                # Fire off 3 requests quickly
+                for i in range(3):
+                    cmd = "curl -s -o /dev/null -w '%{http_code}' -H 'X-API-Key: test-key' http://127.0.0.1:8080/data"
+                    process = await asyncio.create_subprocess_shell(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, _ = await process.communicate()
+                    status_code = stdout.decode().strip()
+                    if i < 2: # First 2 should pass
+                        if status_code == "200": logger.info("  -> Request PASSED (as expected)")
+                        else: logger.error(f"  -> Request FAILED (Expected 200, Got {status_code})")
+                    else: # 3rd should fail
+                        if status_code == "429": logger.info("  -> Request BLOCKED (as expected)")
+                        else: logger.error(f"  -> Request FAILED to be blocked (Expected 429, Got {status_code})")
+
+        logger.info("--- Integration Tests Finished ---\n")
 
 
-def add_upstream_service(
-    service_name: str,
-    service_url: str,
-    service_config: Optional[Dict] = None
-) -> bool:
-    """Add upstream service."""
-    return api_gateway.add_upstream_service(service_name, service_url, service_config)
+    async def main():
+        """Main async function to coordinate services and gateway."""
+        # Start dummy upstream services in the background
+        service1_task = asyncio.create_task(run_dummy_service(8081, "user-service"))
+        service2_task = asyncio.create_task(run_dummy_service(8082, "data-service", health_endpoint=True))
+
+        # Configure the gateway
+        gateway = APIGatewayManagement()
+        gateway.add_upstream_service("users", "http://127.0.0.1:8081")
+        gateway.add_upstream_service("data", "http://127.0.0.1:8082", {"health_check_url": "http://127.0.0.1:8082/health"})
+
+        gateway.add_route("/users/{id}", ["GET"], "users")
+        gateway.add_route("/data", ["GET"], "data", {"auth_required": True, "rate_limit": "data-limit"})
+
+        gateway.add_api_key("test-client", "test-key", ["read:data"])
+        gateway.add_rate_limit("data-limit", RateLimitType.REQUESTS_PER_MINUTE, 2) # Very low limit for testing
+
+        # Start tests in the background
+        test_task = asyncio.create_task(run_tests())
+
+        # Start the gateway server (this will run until stopped)
+        server_task = asyncio.create_task(gateway.run_server())
+
+        await test_task # Wait for tests to complete
+
+        # Cleanly shut down
+        await gateway.stop_gateway()
+        server_task.cancel()
+        service1_task.cancel()
+        service2_task.cancel()
+
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            logger.info("Gateway server has been shut down.")
 
 
-def configure_gateway_auth(
-    auth_method: str,
-    auth_config: Dict
-) -> bool:
-    """Configure gateway authentication."""
-    return api_gateway.configure_authentication(AuthenticationMethod(auth_method), auth_config)
+    parser = argparse.ArgumentParser(description="API Gateway Management CLI")
+    parser.add_argument("command", choices=["start"], help="Command to execute")
+    args = parser.parse_args()
 
-
-async def start_api_gateway() -> bool:
-    """Start API gateway."""
-    return await api_gateway.start_gateway()
-
-
-async def process_api_request(
-    method: str,
-    path: str,
-    headers: Dict,
-    body: Optional[bytes] = None,
-    query_params: Optional[Dict] = None,
-    client_ip: Optional[str] = None
-) -> Dict:
-    """Process API request."""
-    return await api_gateway.process_request(method, path, headers, body, query_params, client_ip)
-
-
-def get_gateway_status() -> Dict:
-    """Get gateway status."""
-    return api_gateway.get_gateway_status()
-
-
-def get_route_metrics(route_path: Optional[str] = None) -> Dict:
-    """Get route metrics."""
-    return api_gateway.get_route_metrics(route_path)
+    if args.command == "start":
+        try:
+            asyncio.run(main())
+        except KeyboardInterrupt:
+            logger.info("Gateway shutting down.")
