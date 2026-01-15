@@ -15,7 +15,9 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from utils.logging_config import get_logger
 
@@ -59,13 +61,19 @@ class AITradingAgent:
             config: Agent configuration
         """
         self.agent_id = agent_id
-        self.config = config or self._get_default_config()
+
+        # Merge provided config with defaults
+        default_config = self._get_default_config()
+        if config:
+            default_config.update(config)
+        self.config = default_config
 
         # ML Models
         self.price_predictor = None
         self.volatility_predictor = None
         self.trade_classifier = None
         self.scaler = StandardScaler()
+        self.training_features: Optional[List[str]] = None
 
         # Trading state
         self.portfolio: Dict[str, float] = {}
@@ -103,12 +111,13 @@ class AITradingAgent:
             }
         }
 
-    async def train_models(self, historical_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def train_models(self, historical_data: List[Dict[str, Any]], tune_hyperparameters: bool = False) -> Dict[str, Any]:
         """
         Train ML models using historical market data.
 
         Args:
             historical_data: Historical price and volume data
+            tune_hyperparameters: Whether to perform hyperparameter tuning
 
         Returns:
             Training results
@@ -121,6 +130,12 @@ class AITradingAgent:
 
             if len(df) < 100:
                 raise ValueError("Insufficient training data")
+
+            if tune_hyperparameters:
+                self.logger.info("Hyperparameter tuning enabled.")
+                # This can be a very long process, so we'll just demonstrate for one model
+                tuned_params = await self.tune_hyperparameters(df)
+                self.config['model_params'] = tuned_params
 
             # Train price prediction model
             self.price_predictor = await self._train_price_predictor(df)
@@ -139,12 +154,42 @@ class AITradingAgent:
                 "status": "trained",
                 "models": ["price_predictor", "volatility_predictor", "trade_classifier"],
                 "evaluation": evaluation,
-                "training_samples": len(df)
+                "training_samples": len(df),
+                "hyperparameters_tuned": tune_hyperparameters
             }
 
         except Exception as e:
             self.logger.error(f"Model training failed: {e}")
             return {"error": str(e)}
+
+    async def tune_hyperparameters(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """Perform hyperparameter tuning for the price predictor."""
+        self.logger.info("Starting hyperparameter tuning for RandomForestRegressor...")
+        features = [col for col in df.columns if col not in ['timestamp', 'price_target', 'trade_signal']]
+        X = df[features]
+        y = df['price_target']
+        X_scaled = self.scaler.fit_transform(X)
+
+        param_grid = {
+            'n_estimators': [50, 100, 150],
+            'max_depth': [5, 10, 15],
+            'min_samples_leaf': [1, 2, 4]
+        }
+
+        grid_search = GridSearchCV(
+            estimator=RandomForestRegressor(random_state=42, n_jobs=-1),
+            param_grid=param_grid,
+            cv=3,
+            n_jobs=-1,
+            scoring='neg_mean_squared_error'
+        )
+
+        # This will run in a thread pool executor to not block the event loop
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, grid_search.fit, X_scaled, y)
+
+        self.logger.info(f"Best parameters found: {grid_search.best_params_}")
+        return grid_search.best_params_
 
     def _prepare_training_data(self, historical_data: List[Dict[str, Any]]) -> pd.DataFrame:
         """Prepare historical data for ML training."""
@@ -179,17 +224,19 @@ class AITradingAgent:
     async def _train_price_predictor(self, df: pd.DataFrame) -> RandomForestRegressor:
         """Train price prediction model."""
         features = [col for col in df.columns if col not in ['timestamp', 'price_target', 'trade_signal']]
+        self.training_features = features  # Save feature names
         X = df[features]
         y = df['price_target']
 
         X_scaled = self.scaler.fit_transform(X)
 
-        model = RandomForestRegressor(
-            n_estimators=100,
-            max_depth=10,
-            random_state=42,
-            n_jobs=-1
-        )
+        params = self.config.get('model_params', {
+            'n_estimators': 100,
+            'max_depth': 10,
+            'random_state': 42,
+            'n_jobs': -1
+        })
+        model = RandomForestRegressor(**params)
         model.fit(X_scaled, y)
 
         return model
@@ -251,21 +298,23 @@ class AITradingAgent:
 
     async def generate_market_prediction(
         self,
-        current_market_data: Dict[str, Any]
+        current_market_data: Dict[str, Any],
+        historical_df: pd.DataFrame
     ) -> Dict[str, Any]:
         """
         Generate market price prediction.
 
         Args:
             current_market_data: Current market conditions
+            historical_df: DataFrame with historical data for feature calculation
 
         Returns:
             Prediction results
         """
         try:
-            # Prepare features
-            features = self._extract_features(current_market_data)
-            features_scaled = self.scaler.transform([features])
+            # Prepare features using historical context
+            features = self._extract_features(current_market_data, historical_df)
+            features_scaled = self.scaler.transform(features.to_frame().T)
 
             # Generate predictions
             predicted_price = self.price_predictor.predict(features_scaled)[0]
@@ -291,17 +340,61 @@ class AITradingAgent:
             self.logger.error(f"Market prediction failed: {e}")
             return {"error": str(e)}
 
-    def _extract_features(self, market_data: Dict[str, Any]) -> List[float]:
-        """Extract features from market data for prediction."""
-        # This would extract the same features used in training
-        # Simplified implementation
-        return [
-            market_data["price"],
-            market_data.get("volume", 0),
-            market_data.get("volatility", 0),
-            market_data.get("sma_24", market_data["price"]),
-            market_data.get("rsi", 50)
-        ]
+    def _extract_features(self, market_data: Dict[str, Any], historical_df: pd.DataFrame) -> pd.Series:
+        """Extract features from market data for prediction, using historical context."""
+        # Create a temporary DataFrame for the new data point
+        temp_df = pd.DataFrame([market_data])
+        # Ensure timestamp is datetime object for proper indexing, handling potential ISO format string
+        if isinstance(temp_df['timestamp'].iloc[0], str):
+            temp_df['timestamp'] = pd.to_datetime(temp_df['timestamp'])
+        temp_df = temp_df.set_index('timestamp')
+
+        # Combine with historical data to calculate rolling features
+        if isinstance(historical_df, pd.DataFrame) and not historical_df.empty:
+            # Ensure index types match
+            if not isinstance(historical_df.index, pd.DatetimeIndex):
+                 historical_df.index = pd.to_datetime(historical_df.index)
+
+            combined_price_series = pd.concat([historical_df['price'], temp_df['price']])
+            combined_volume_series = pd.concat([historical_df['volume'], temp_df['volume']])
+        else:
+            combined_price_series = temp_df['price']
+            combined_volume_series = temp_df['volume']
+
+
+        # Use a temporary dataframe to calculate all features in a consistent way
+        features = pd.DataFrame(index=temp_df.index)
+        features['price'] = temp_df['price']
+        features['volume'] = temp_df['volume']
+
+        # Add technical indicators
+        features['returns'] = combined_price_series.pct_change().iloc[-1]
+        features['volatility'] = combined_price_series.rolling(window=24, min_periods=1).std().iloc[-1]
+        features['sma_24'] = combined_price_series.rolling(window=24, min_periods=1).mean().iloc[-1]
+        features['sma_168'] = combined_price_series.rolling(window=168, min_periods=1).mean().iloc[-1]
+        features['rsi'] = self._calculate_rsi(combined_price_series).iloc[-1]
+
+        # Add lagged features from the historical dataframe
+        for lag in [1, 2, 3, 6, 12, 24]:
+            if len(combined_price_series) > lag:
+                features[f'price_lag_{lag}'] = combined_price_series.iloc[-(lag+1)]
+                features[f'volume_lag_{lag}'] = combined_volume_series.iloc[-(lag+1)]
+            else:
+                features[f'price_lag_{lag}'] = np.nan
+                features[f'volume_lag_{lag}'] = np.nan
+
+        # Ensure order and columns match training
+        if not self.training_features:
+            raise ValueError("Model has not been trained yet, feature names are unknown.")
+        features = features.reindex(columns=self.training_features)
+
+        # Fill any missing values that might occur from lagging (e.g., at the start)
+        features = features.fillna(method='ffill').fillna(method='bfill')
+
+        # Final check to prevent any NaN values if all are missing
+        features = features.fillna(0)
+
+        return features.iloc[0]
 
     async def execute_trading_strategy(
         self,
@@ -319,8 +412,11 @@ class AITradingAgent:
             Trade execution result or None
         """
         try:
+            portfolio_value = self.portfolio.get('cash', 0) + self.portfolio.get('energy', 0) * market_data['price']
+
             # Check risk limits
-            if not self._check_risk_limits():
+            if not self._check_risk_limits(portfolio_value):
+                self.logger.warning("Trade halted due to risk limit breach.")
                 return None
 
             # Generate trading signal
@@ -330,9 +426,9 @@ class AITradingAgent:
                 return None
 
             # Calculate position size
-            position_size = self._calculate_position_size(signal, market_data)
+            position_size = self._calculate_position_size(signal, market_data, portfolio_value)
 
-            if position_size == 0:
+            if position_size <= 0:
                 return None
 
             # Execute trade
@@ -360,24 +456,43 @@ class AITradingAgent:
         if confidence < self.config["confidence_threshold"]:
             return {"action": "hold", "reason": "low_confidence"}
 
-        if self.config["strategy"] == TradingStrategy.MOMENTUM.value:
-            if price_change_pct > 2.0:  # Expected >2% increase
+        strategy = self.config["strategy"]
+
+        if strategy == TradingStrategy.MOMENTUM.value:
+            if price_change_pct > 2.0:
                 return {"action": "buy", "strength": confidence, "expected_return": price_change_pct}
-            elif price_change_pct < -2.0:  # Expected >2% decrease
+            elif price_change_pct < -2.0:
                 return {"action": "sell", "strength": confidence, "expected_return": abs(price_change_pct)}
 
-        elif self.config["strategy"] == TradingStrategy.MEAN_REVERSION.value:
-            if price_change_pct < -1.0:  # Expected price increase
-                return {"action": "buy", "strength": confidence, "expected_return": abs(price_change_pct)}
-            elif price_change_pct > 1.0:  # Expected price decrease
+        elif strategy == TradingStrategy.MEAN_REVERSION.value:
+            if prediction.get("rsi", 50) > 70 and price_change_pct > 1.0: # Overbought, expect drop
                 return {"action": "sell", "strength": confidence, "expected_return": price_change_pct}
+            elif prediction.get("rsi", 50) < 30 and price_change_pct < -1.0: # Oversold, expect rise
+                return {"action": "buy", "strength": confidence, "expected_return": abs(price_change_pct)}
+
+        elif strategy == TradingStrategy.ARBITRAGE.value:
+            # Requires multiple market data sources, which we simulate here
+            other_market_price = prediction.get("other_market_price", prediction['current_price'])
+            price_diff = prediction['current_price'] - other_market_price
+            if price_diff > 2.0: # Our market is expensive
+                return {"action": "sell", "strength": confidence, "reason": "arbitrage_opportunity"}
+            elif price_diff < -2.0: # Our market is cheap
+                return {"action": "buy", "strength": confidence, "reason": "arbitrage_opportunity"}
+
+        elif strategy == TradingStrategy.MARKET_MAKING.value:
+            # Aims to profit from the bid-ask spread
+            spread = prediction.get("bid_ask_spread", 0.5)
+            if spread > 0.2: # If spread is wide enough, place buy and sell orders
+                 # This is a simplified representation. A real market maker would place limit orders.
+                return {"action": "market_make", "strength": confidence, "spread": spread}
 
         return {"action": "hold", "reason": "no_clear_signal"}
 
     def _calculate_position_size(
         self,
         signal: Dict[str, Any],
-        market_data: Dict[str, Any]
+        market_data: Dict[str, Any],
+        portfolio_value: float
     ) -> float:
         """Calculate position size based on risk management."""
         max_size = self.config["max_position_size"]
@@ -400,25 +515,44 @@ class AITradingAgent:
         position_size = max_size * size_adjustment
 
         # Check risk limits
-        if self._would_exceed_risk_limits(position_size, market_data["price"]):
+        if self._would_exceed_risk_limits(position_size, market_data["price"], portfolio_value):
             position_size = 0
 
         return position_size
 
-    def _check_risk_limits(self) -> bool:
-        """Check if current risk is within limits."""
-        return self.current_risk < self.risk_limits["max_drawdown"]
+    def _check_risk_limits(self, portfolio_value: float) -> bool:
+        """Check if current risk is within limits, including VaR."""
+        # Check drawdown
+        if self.current_risk >= self.risk_limits["max_drawdown"]:
+            self.logger.warning("Risk limit exceeded: Max drawdown.")
+            return False
 
-    def _would_exceed_risk_limits(self, position_size: float, price: float) -> bool:
+        # Calculate and check Value at Risk (VaR)
+        if self.trade_history:
+            returns = pd.Series([t.get('pnl', 0) for t in self.trade_history if 'pnl' in t])
+            if not returns.empty:
+                var_limit_quantile = 1 - self.config["risk_limits"]["var_limit"]
+                value_at_risk = returns.quantile(var_limit_quantile) * portfolio_value
+                if abs(value_at_risk) > self.config["risk_limits"]["max_daily_loss"] * portfolio_value:
+                    self.logger.warning(f"Risk limit exceeded: VaR ({value_at_risk:.2f}) is over the daily loss limit.")
+                    return False
+
+        return True
+
+    def _would_exceed_risk_limits(self, position_size: float, price: float, portfolio_value: float) -> bool:
         """Check if proposed position would exceed risk limits."""
         position_value = position_size * price
-        portfolio_value = sum(self.portfolio.values())
 
         if portfolio_value == 0:
             return False
 
-        new_risk = position_value / portfolio_value
-        return new_risk > self.risk_limits["max_position_risk"]
+        new_risk = position_value / portfolio_value if portfolio_value > 0 else 0
+
+        if new_risk > self.risk_limits["max_position_risk"]:
+            self.logger.warning(f"Trade blocked: Position risk ({new_risk:.2%}) exceeds limit ({self.risk_limits['max_position_risk']:.2%}).")
+            return True
+
+        return False
 
     async def _execute_trade(
         self,
@@ -430,10 +564,11 @@ class AITradingAgent:
         # In real implementation, this would interface with the trading marketplace
         # For now, simulate trade execution
 
+        trade_timestamp = datetime.now()
         trade = {
-            "trade_id": f"trade_{self.agent_id}_{int(datetime.now().timestamp())}",
+            "trade_id": f"trade_{self.agent_id}_{int(trade_timestamp.timestamp())}",
             "agent_id": self.agent_id,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": trade_timestamp.isoformat(),
             "action": signal["action"],
             "energy_amount": position_size,
             "price": market_data["price"],
@@ -443,6 +578,16 @@ class AITradingAgent:
             "market_conditions": market_data,
             "status": "executed"
         }
+
+        # Simulate P&L for backtesting
+        if "price_target" in market_data:
+            price_change = market_data["price_target"] - market_data["price"]
+            if trade["action"] == "buy":
+                trade["pnl"] = price_change * position_size
+            elif trade["action"] == "sell":
+                trade["pnl"] = -price_change * position_size
+            else:
+                trade["pnl"] = 0
 
         return trade
 
@@ -475,7 +620,8 @@ class AITradingAgent:
     async def backtest_strategy(
         self,
         historical_data: List[Dict[str, Any]],
-        initial_balance: float = 10000.0
+        initial_balance: float = 10000.0,
+        tune_hyperparameters: bool = False
     ) -> Dict[str, Any]:
         """
         Backtest trading strategy on historical data.
@@ -494,79 +640,142 @@ class AITradingAgent:
             self.portfolio = {"cash": initial_balance, "energy": 0}
             self.trade_history = []
 
+            # Prepare dataframes
+            df = pd.DataFrame(historical_data)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.set_index('timestamp').sort_index()
+
+            split_point = int(len(df) * 0.7)
+            train_df = df.iloc[:split_point]
+            test_df = df.iloc[split_point:]
+
             # Train models on subset of data
-            train_data = historical_data[:int(len(historical_data) * 0.7)]
-            await self.train_models(train_data)
+            await self.train_models(train_df.reset_index().to_dict('records'), tune_hyperparameters=tune_hyperparameters)
 
             # Run backtest
-            test_data = historical_data[int(len(historical_data) * 0.7):]
+            history_df = train_df.copy()
 
-            for market_data in test_data:
-                # Generate prediction
-                prediction = await self.generate_market_prediction(market_data)
+            for timestamp, market_data_row in test_df.iterrows():
+                market_data = market_data_row.to_dict()
+                market_data['timestamp'] = timestamp.isoformat() # Add timestamp back in as iso string
+
+                # We need to simulate the 'price_target' for PnL calculation
+                current_time_index = test_df.index.get_loc(timestamp)
+                if current_time_index + self.config['prediction_horizon'] < len(test_df):
+                    market_data['price_target'] = test_df['price'].iloc[current_time_index + self.config['prediction_horizon']]
+                else:
+                    market_data['price_target'] = market_data['price'] # No future price available
+
+                # Generate prediction using historical context
+                prediction = await self.generate_market_prediction(market_data, history_df)
+                if 'error' in prediction:
+                    self.logger.error(f"Prediction failed for {timestamp}, skipping trade. Error: {prediction['error']}")
+                    # Still need to update history
+                    new_row_df = pd.DataFrame([market_data])
+                    new_row_df['timestamp'] = pd.to_datetime(new_row_df['timestamp'])
+                    new_row_df = new_row_df.set_index('timestamp')
+                    history_df = pd.concat([history_df, new_row_df[train_df.columns.intersection(new_row_df.columns)]])
+                    continue
 
                 # Execute strategy
                 trade = await self.execute_trading_strategy(market_data, prediction)
+
+                # Update history for next iteration's feature calculation
+                new_row_df = pd.DataFrame([market_data])
+                new_row_df['timestamp'] = pd.to_datetime(new_row_df['timestamp'])
+                new_row_df = new_row_df.set_index('timestamp')
+                history_df = pd.concat([history_df, new_row_df[train_df.columns.intersection(new_row_df.columns)]])
 
                 # Simulate market movement
                 await asyncio.sleep(0.001)  # Small delay for simulation
 
             # Calculate performance metrics
-            performance = self._calculate_performance_metrics()
+            performance, portfolio_over_time = self._calculate_performance_metrics(initial_balance)
+            self.performance_metrics = performance
+
+            # Plot results
+            self.plot_backtest_results(portfolio_over_time)
 
             return {
                 "status": "completed",
                 "trades_executed": len(self.trade_history),
-                "final_balance": self.portfolio.get("cash", 0) + self.portfolio.get("energy", 0) * 0.15,
+                "final_balance": portfolio_over_time.iloc[-1]['total_value'] if not portfolio_over_time.empty else initial_balance,
                 "performance": performance,
-                "trade_history": self.trade_history[-10:]  # Last 10 trades
+                "trade_history": self.trade_history[-10:],  # Last 10 trades
+                "plot_path": f"{self.agent_id}_backtest_results.png"
             }
 
         except Exception as e:
             self.logger.error(f"Backtest failed: {e}")
             return {"error": str(e)}
 
-    def _calculate_performance_metrics(self) -> Dict[str, Any]:
-        """Calculate trading performance metrics."""
+    def _calculate_performance_metrics(self, initial_balance: float) -> Tuple[Dict[str, Any], pd.DataFrame]:
+        """Calculate trading performance metrics and portfolio value over time."""
         if not self.trade_history:
-            return {"error": "No trades executed"}
+            return {"error": "No trades executed"}, pd.DataFrame()
 
-        # Calculate returns
-        initial_balance = 10000.0
-        final_balance = self.portfolio.get("cash", 0) + self.portfolio.get("energy", 0) * 0.15
+        trade_df = pd.DataFrame(self.trade_history)
+        trade_df['timestamp'] = pd.to_datetime(trade_df['timestamp'])
+        trade_df = trade_df.set_index('timestamp').sort_index()
+
+        trade_df['pnl'] = trade_df['pnl'].fillna(0)
+        trade_df['cumulative_pnl'] = trade_df['pnl'].cumsum()
+        trade_df['total_value'] = initial_balance + trade_df['cumulative_pnl']
+
+        final_balance = trade_df['total_value'].iloc[-1]
         total_return = (final_balance - initial_balance) / initial_balance * 100
 
-        # Calculate win rate
-        profitable_trades = sum(1 for trade in self.trade_history if trade.get("pnl", 0) > 0)
-        win_rate = profitable_trades / len(self.trade_history) * 100
+        profitable_trades = trade_df[trade_df['pnl'] > 0].shape[0]
+        win_rate = profitable_trades / len(trade_df) * 100 if len(trade_df) > 0 else 0
 
-        # Calculate Sharpe ratio (simplified)
-        returns = [trade.get("pnl", 0) for trade in self.trade_history]
-        if returns:
-            avg_return = np.mean(returns)
-            std_return = np.std(returns)
-            sharpe_ratio = avg_return / std_return if std_return > 0 else 0
-        else:
-            sharpe_ratio = 0
+        returns = trade_df['pnl']
+        sharpe_ratio = returns.mean() / returns.std() if returns.std() > 0 else 0
 
-        # Calculate maximum drawdown
-        portfolio_values = [10000.0]
-        for trade in self.trade_history:
-            pnl = trade.get("pnl", 0)
-            portfolio_values.append(portfolio_values[-1] + pnl)
+        # Max Drawdown
+        rolling_max = trade_df['total_value'].cummax()
+        drawdown = (trade_df['total_value'] - rolling_max) / rolling_max
+        max_drawdown = abs(drawdown.min()) * 100
 
-        peak = max(portfolio_values)
-        trough = min(portfolio_values)
-        max_drawdown = (peak - trough) / peak * 100
-
-        return {
+        metrics = {
             "total_return_pct": total_return,
             "win_rate_pct": win_rate,
             "sharpe_ratio": sharpe_ratio,
             "max_drawdown_pct": max_drawdown,
             "total_trades": len(self.trade_history),
-            "avg_trade_pnl": np.mean(returns) if returns else 0
+            "avg_trade_pnl": returns.mean()
         }
+        return metrics, trade_df[['total_value']]
+
+    def plot_backtest_results(self, portfolio_over_time: pd.DataFrame):
+        """Generate and save a plot of backtest results."""
+        if portfolio_over_time.empty:
+            self.logger.warning("Cannot plot results, no portfolio data available.")
+            return
+
+        plt.style.use('seaborn-v0_8-darkgrid')
+        fig, ax = plt.subplots(figsize=(15, 7))
+
+        portfolio_over_time['total_value'].plot(ax=ax, color='navy', label='Portfolio Value')
+
+        ax.set_title(f'Backtest Results for Agent {self.agent_id} ({self.config["strategy"]})', fontsize=16)
+        ax.set_xlabel('Date', fontsize=12)
+        ax.set_ylabel('Portfolio Value (€)', fontsize=12)
+        ax.legend(loc='upper left')
+        ax.grid(True)
+
+        # Annotate with final metrics
+        metrics_text = (
+            f"Total Return: {self.performance_metrics['total_return_pct']:.2f}%\n"
+            f"Sharpe Ratio: {self.performance_metrics['sharpe_ratio']:.2f}\n"
+            f"Max Drawdown: {self.performance_metrics['max_drawdown_pct']:.2f}%"
+        )
+        ax.text(0.02, 0.98, metrics_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+
+        plot_path = f"{self.agent_id}_backtest_results.png"
+        plt.savefig(plot_path)
+        plt.close(fig)
+        self.logger.info(f"Backtest plot saved to {plot_path}")
 
     def get_agent_status(self) -> Dict[str, Any]:
         """Get current agent status and metrics."""
@@ -584,29 +793,145 @@ class AITradingAgent:
         }
 
 
-# Global trading agent instance
-ai_trading_agent = AITradingAgent("primary_agent")
+class TradingAgentManager:
+    """Manages multiple AI trading agents."""
+
+    def __init__(self):
+        self.agents: Dict[str, AITradingAgent] = {}
+        self.logger = get_logger(__name__)
+
+    def create_agent(self, agent_id: str, config: Optional[Dict[str, Any]] = None) -> AITradingAgent:
+        """Create and register a new trading agent."""
+        if agent_id in self.agents:
+            raise ValueError(f"Agent with ID '{agent_id}' already exists.")
+
+        agent = AITradingAgent(agent_id, config)
+        self.agents[agent_id] = agent
+        self.logger.info(f"Created new trading agent: {agent_id}")
+        return agent
+
+    def get_agent(self, agent_id: str) -> Optional[AITradingAgent]:
+        """Retrieve a trading agent by its ID."""
+        return self.agents.get(agent_id)
+
+    def list_agents(self) -> List[str]:
+        """List all registered agent IDs."""
+        return list(self.agents.keys())
 
 
-async def create_trading_agent(agent_id: str, config: Dict[str, Any]) -> AITradingAgent:
-    """Create a new AI trading agent."""
-    return AITradingAgent(agent_id, config)
+async def run_live_simulation(agent: AITradingAgent, historical_data: List[Dict[str, Any]], duration_minutes: int = 1):
+    """Run a live trading simulation."""
+    logger.info(f"Starting live simulation for agent {agent.agent_id} for {duration_minutes} minutes.")
+    start_time = datetime.now()
+    end_time = start_time + timedelta(minutes=duration_minutes)
+
+    # Use historical data as the basis for the live simulation
+    history_df = pd.DataFrame(historical_data)
+    history_df['timestamp'] = pd.to_datetime(history_df['timestamp'])
+    history_df = history_df.set_index('timestamp').sort_index()
+
+    # Get the last known market state
+    last_market_data = history_df.iloc[-1].to_dict()
+
+    while datetime.now() < end_time:
+        # Simulate a new market data tick
+        price_change = np.random.normal(0, 0.5)
+        last_market_data['price'] += price_change
+        last_market_data['volume'] = int(max(0, last_market_data.get('volume', 1000) + np.random.randint(-100, 100)))
+        current_timestamp = datetime.now()
+
+        market_data = {
+            "price": last_market_data['price'],
+            "volume": last_market_data['volume'],
+            "timestamp": current_timestamp.isoformat()
+        }
+        logger.info(f"[Live Sim] New market price: {market_data['price']:.2f}")
+
+        # Generate prediction using the full history
+        prediction = await agent.generate_market_prediction(market_data, history_df)
+        if 'error' in prediction:
+            logger.error(f"[Live Sim] Prediction failed: {prediction['error']}")
+            new_row = pd.DataFrame([market_data])
+            new_row['timestamp'] = pd.to_datetime(new_row['timestamp'])
+            new_row = new_row.set_index('timestamp')
+            history_df = pd.concat([history_df, new_row])
+            await asyncio.sleep(5)
+            continue
+
+        logger.info(f"[Live Sim] Prediction: Price will be {prediction['predicted_price']:.2f} with {prediction['confidence']:.2%} confidence.")
+
+        # Execute trade
+        trade = await agent.execute_trading_strategy(market_data, prediction)
+        if trade:
+            logger.info(f"[Live Sim] Trade executed: {trade['action']} {trade['energy_amount']:.2f} kWh at €{trade['price']:.2f}")
+        else:
+            logger.info("[Live Sim] No trade executed.")
+
+        await asyncio.sleep(5) # Wait for the next market tick
+
+    logger.info("Live simulation finished.")
 
 
-async def get_market_prediction(market_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Get market prediction from AI agent."""
-    return await ai_trading_agent.generate_market_prediction(market_data)
+if __name__ == '__main__':
 
+    def generate_sample_historical_data(days=90):
+        """Generates sample time-series data for backtesting."""
+        base_price = 100
+        dates = pd.date_range(end=datetime.now(), periods=days * 24, freq='h')
+        prices = base_price + np.random.randn(len(dates)).cumsum() * 0.4
+        volumes = np.random.randint(500, 2000, size=len(dates))
 
-async def execute_automated_trade(market_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Execute automated trade based on AI prediction."""
-    prediction = await ai_trading_agent.generate_market_prediction(market_data)
-    return await ai_trading_agent.execute_trading_strategy(market_data, prediction)
+        data = pd.DataFrame({'timestamp': dates, 'price': prices, 'volume': volumes})
+        return data.to_dict('records')
 
+    async def main():
+        """Main execution block."""
+        historical_data = generate_sample_historical_data()
 
-async def run_strategy_backtest(
-    historical_data: List[Dict[str, Any]],
-    initial_balance: float = 10000.0
-) -> Dict[str, Any]:
-    """Run strategy backtest."""
-    return await ai_trading_agent.backtest_strategy(historical_data, initial_balance)
+        # Initialize the agent manager
+        manager = TradingAgentManager()
+
+        # Create a momentum trading agent
+        momentum_agent_config = {
+            "strategy": TradingStrategy.MOMENTUM.value,
+            "risk_level": RiskLevel.MODERATE.value,
+        }
+        momentum_agent = manager.create_agent("momentum_agent_01", momentum_agent_config)
+
+        # Train the agent's models (with optional hyperparameter tuning)
+        logger.info("--- Training Momentum Agent ---")
+        await momentum_agent.train_models(historical_data, tune_hyperparameters=False)
+
+        # Run a backtest
+        logger.info("\n--- Running Backtest for Momentum Agent ---")
+        backtest_results = await momentum_agent.backtest_strategy(historical_data, initial_balance=10000.0)
+
+        if 'error' in backtest_results:
+            logger.error(f"Backtest failed: {backtest_results['error']}")
+        else:
+            logger.info(f"Backtest complete. Final Balance: €{backtest_results['final_balance']:.2f}")
+            logger.info(f"Performance: {backtest_results['performance']}")
+            logger.info(f"Results plot saved to: {backtest_results['plot_path']}")
+
+        # Create a mean-reversion agent
+        mean_reversion_agent_config = {
+            "strategy": TradingStrategy.MEAN_REVERSION.value,
+            "risk_level": RiskLevel.CONSERVATIVE.value
+        }
+        mean_reversion_agent = manager.create_agent("mean_reversion_agent_02", mean_reversion_agent_config)
+
+        # Train and backtest the second agent
+        logger.info("\n--- Training and Backtesting Mean Reversion Agent ---")
+        await mean_reversion_agent.train_models(historical_data)
+        await mean_reversion_agent.backtest_strategy(historical_data)
+
+        # Run a short live simulation with the first agent
+        logger.info("\n--- Starting Live Trading Simulation ---")
+        # In a real scenario, the models should be trained on the most recent data
+        await run_live_simulation(momentum_agent, historical_data, duration_minutes=1)
+
+    # Run the main async function
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Simulation stopped by user.")
