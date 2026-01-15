@@ -16,3 +16,4 @@ matplotlib
 seaborn
 fastapi
 uvicorn
+torch
