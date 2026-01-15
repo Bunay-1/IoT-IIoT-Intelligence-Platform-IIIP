@@ -765,6 +765,80 @@ class DigitalTwinEngine:
 
         return summary
 
+    async def run_predictive_maintenance_analysis(
+        self,
+        twin_id: str,
+        historical_data: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Run predictive maintenance analysis to estimate Remaining Useful Life (RUL).
+
+        Args:
+            twin_id: Twin identifier
+            historical_data: List of historical sensor readings and operational data.
+                             Each entry should be a dict with sensor values and an 'RUL' target.
+
+        Returns:
+            Analysis results including predicted RUL.
+        """
+        try:
+            if twin_id not in self.twin_models:
+                raise DigitalTwinError(f"Twin {twin_id} not found")
+
+            self.logger.info(f"Running predictive maintenance analysis for twin {twin_id}")
+
+            if len(historical_data) < 20: # Need sufficient data to train
+                raise ValueError("Not enough historical data for analysis. Need at least 20 data points.")
+
+            # --- 1. Prepare Data ---
+            # Assuming historical_data is a list of dicts like:
+            # {'temp': 35.2, 'vibration': 0.1, 'rpm': 2000, 'RUL': 150}
+            features = [list(d.values())[:-1] for d in historical_data]
+            target = [d['RUL'] for d in historical_data]
+
+            X = np.array(features)
+            y = np.array(target)
+
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+
+            # --- 2. Train Model ---
+            model = RandomForestRegressor(n_estimators=100, random_state=42)
+            model.fit(X_scaled, y)
+
+            # --- 3. Make Prediction ---
+            # Use the latest state of the twin for prediction
+            current_state = self.get_twin_state(twin_id)
+            if not current_state:
+                raise DigitalTwinError("Could not retrieve current state for prediction.")
+
+            # Construct the feature vector from the current state
+            # This needs to match the order of features in historical_data
+            # IMPORTANT: This assumes a fixed order of sensors. A robust implementation
+            # would use feature names.
+            current_features_list = [s['value'] for s in current_state['sensors'].values()]
+            current_features = np.array(current_features_list).reshape(1, -1)
+            current_features_scaled = scaler.transform(current_features)
+
+            predicted_rul = model.predict(current_features_scaled)[0]
+
+            # --- 4. Update Twin State ---
+            prediction_result = {
+                "predicted_rul_hours": round(predicted_rul, 2),
+                "model_used": "RandomForestRegressor",
+                "confidence_score": round(model.score(X_scaled, y), 3), # R^2 score as confidence
+                "analysis_timestamp": time.time()
+            }
+            self.twin_states[twin_id]["predictions"]["maintenance"] = prediction_result
+
+            self.logger.info(f"Predictive maintenance analysis for {twin_id} complete. Predicted RUL: {predicted_rul:.2f} hours.")
+
+            return prediction_result
+
+        except Exception as e:
+            self.logger.error(f"Predictive maintenance analysis failed for twin {twin_id}: {e}")
+            raise DigitalTwinError(f"Predictive maintenance analysis failed: {e}") from e
+
     async def run_what_if_analysis(
         self,
         twin_id: str,
