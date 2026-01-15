@@ -11,3 +11,6 @@ scipy
 dash
 dash-bootstrap-components
 dotenv
+aiohttp
+matplotlib
+seaborn
