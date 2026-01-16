@@ -1,0 +1,17 @@
+INFO:     Started server process [69433]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+Starting Central Dashboard Server...
+Navigate to http://127.0.0.1:8000/dashboard/ to view the dashboard.
+INFO:     127.0.0.1:51224 - "GET /dashboard/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55464 - "GET /dashboard/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55464 - "GET /dashboard/api/system-overview HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55466 - "GET /dashboard/api/alerts HTTP/1.1" 200 OK
+WARNING:  Unsupported upgrade request.
+WARNING:  No supported WebSocket library detected. Please use "pip install 'uvicorn[standard]'", or install 'websockets' or 'wsproto' manually.
+INFO:     127.0.0.1:55480 - "GET /dashboard/ws HTTP/1.1" 404 Not Found
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [69433]
