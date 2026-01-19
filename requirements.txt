@@ -12,6 +12,7 @@ scikit-optimize
 scipy
 seaborn==0.13.2
 shap==0.45.1
+spacy
 structlog==24.2.0
 torch==2.3.1
 uvicorn==0.29.0
