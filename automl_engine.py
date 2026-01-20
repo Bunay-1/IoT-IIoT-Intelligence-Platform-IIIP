@@ -14,8 +14,6 @@ import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn as nn
 import xgboost as xgb
 from sklearn.ensemble import (
     GradientBoostingClassifier,
@@ -36,8 +34,8 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVC, SVR
 
-from edge_ai_optimization import optimize_model_for_edge
-from multi_modal_learning import MultiModalLearning
+# from edge_ai_optimization import optimize_model_for_edge
+# from multi_modal_learning import MultiModalLearning
 # from neural_architecture_search import run_nas_search
 # from quantum_integration import QuantumMLIntegration, QuantumOptimizer
 
@@ -95,16 +93,17 @@ class AutoMLEngine:
         self.experiments = []  # Experiment tracking
 
         # Initialize quantum components
-        self.quantum_optimizer = QuantumOptimizer(platform="simulator")
-        self.quantum_ml = QuantumMLIntegration(self.quantum_optimizer)
+        # self.quantum_optimizer = QuantumOptimizer(platform="simulator")
+        # self.quantum_ml = QuantumMLIntegration(self.quantum_optimizer)
 
-    async def auto_train(
+    def auto_train(
         self,
         X: pd.DataFrame,
         y: pd.Series,
         problem_type: str = "auto",
         test_size: float = 0.2,
         cv_folds: int = 5,
+        feature_engineering: bool = False,
     ) -> Dict[str, Any]:
         """
         Automatically train and select the best model.
@@ -115,6 +114,7 @@ class AutoMLEngine:
             problem_type: 'regression', 'classification', or 'auto'
             test_size: Test set size
             cv_folds: Number of cross-validation folds
+            feature_engineering: If True, automatically generate new features.
 
         Returns:
             Dictionary with training results and best model info
@@ -122,6 +122,12 @@ class AutoMLEngine:
         start_time = time.time()
 
         try:
+            # Auto Feature Engineering
+            if feature_engineering:
+                logger.info("Performing automatic feature engineering...")
+                X = self._auto_feature_engineering(X)
+                logger.info(f"Data shape after feature engineering: {X.shape}")
+
             logger.info(
                 f"Starting AutoML training with {len(X)} samples, {len(X.columns)} features"
             )
@@ -269,7 +275,7 @@ class AutoMLEngine:
             logger.error(f"AutoML training failed: {e}")
             raise
 
-    async def auto_train_with_nas(
+    def auto_train_with_nas(
         self,
         X: pd.DataFrame,
         y: pd.Series,
@@ -278,80 +284,12 @@ class AutoMLEngine:
         nas_generations: int = 5,
     ) -> Dict[str, Any]:
         """
-        Advanced AutoML training with Neural Architecture Search.
-
-        Args:
-            X: Feature matrix
-            y: Target variable
-            problem_type: 'regression', 'classification', or 'auto'
-            test_size: Test set size
-            nas_generations: Number of NAS generations
-
-        Returns:
-            Dictionary with training results including NAS results
+        Advanced AutoML training with Neural Architecture Search. (Not implemented)
         """
-        start_time = time.time()
+        logger.warning("auto_train_with_nas is not implemented in this version.")
+        return self.auto_train(X, y, problem_type, test_size)
 
-        try:
-            logger.info("Starting AutoML training with Neural Architecture Search")
-
-            # First run standard AutoML
-            standard_results = await self.auto_train(X, y, problem_type, test_size)
-
-            # Determine problem type
-            if problem_type == "auto":
-                problem_type = standard_results["problem_type"]
-
-            # Prepare data for NAS
-            X_processed, y_processed, encoders = self._preprocess_data(
-                X, y, problem_type
-            )
-
-            # Split data
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_processed.values,
-                y_processed,
-                test_size=test_size,
-                random_state=42,
-                stratify=y_processed if problem_type == "classification" else None,
-            )
-
-            # Run NAS
-            nas_results = await run_nas_search(
-                input_dim=X_train.shape[1],
-                output_dim=1
-                if problem_type == "regression"
-                else len(np.unique(y_train)),
-                train_data=(X_train, y_train),
-                val_data=(X_test, y_test),
-            )
-
-            # Compare NAS with traditional models
-            nas_score = -nas_results["best_fitness"]  # Convert back to positive score
-
-            enhanced_results = standard_results.copy()
-            enhanced_results["nas_results"] = nas_results
-            enhanced_results["nas_score"] = nas_score
-
-            # Update best model if NAS is better
-            if nas_score > standard_results["best_score"]:
-                enhanced_results["best_model"] = "neural_architecture_search"
-                enhanced_results["best_score"] = nas_score
-                logger.info(
-                    f"NAS found better model: {nas_score:.4f} vs {standard_results['best_score']:.4f}"
-                )
-
-            enhanced_results["training_time"] = time.time() - start_time
-
-            logger.info("AutoML with NAS completed")
-            return enhanced_results
-
-        except Exception as e:
-            logger.error(f"AutoML with NAS failed: {e}")
-            # Fallback to standard AutoML
-            return await self.auto_train(X, y, problem_type, test_size)
-
-    async def train_multimodal_model(
+    def train_multimodal_model(
         self,
         sensor_data: pd.DataFrame,
         text_data: Optional[List[str]] = None,
@@ -360,84 +298,12 @@ class AutoMLEngine:
         test_size: float = 0.2,
     ) -> Dict[str, Any]:
         """
-        Train multi-modal model combining sensor, text, and categorical data.
-
-        Args:
-            sensor_data: Sensor time-series data
-            text_data: Text logs/descriptions
-            categorical_data: Categorical metadata
-            targets: Target variable
-            test_size: Test set size
-
-        Returns:
-            Training results
+        Train multi-modal model. (Not implemented)
         """
-        start_time = time.time()
+        logger.warning("train_multimodal_model is not implemented in this version.")
+        raise NotImplementedError
 
-        try:
-            logger.info("Starting multi-modal model training")
-
-            # Initialize multi-modal learning
-            multimodal = MultiModalLearning()
-
-            # Add sensor modality
-            sensor_dim = sensor_data.shape[1]
-            multimodal.add_sensor_modality("sensors", sensor_dim)
-
-            # Add text modality if available
-            if text_data:
-                multimodal.add_text_modality("logs")
-
-            # Add categorical modality if available
-            if categorical_data:
-                vocab_sizes = {}
-                for cat_name, cat_values in categorical_data.items():
-                    unique_vals = set(cat_values)
-                    vocab_sizes[cat_name] = len(unique_vals)
-                multimodal.add_categorical_modality("metadata", vocab_sizes)
-
-            # Build model
-            num_classes = len(targets.unique()) if len(targets.unique()) > 2 else 1
-            multimodal.build_model(num_classes)
-
-            # Prepare training data
-            train_data = {"sensors": torch.FloatTensor(sensor_data.values)}
-
-            if text_data:
-                train_data["logs"] = text_data
-
-            if categorical_data:
-                for cat_name, cat_values in categorical_data.items():
-                    # Convert to tensor
-                    le = LabelEncoder()
-                    encoded = le.fit_transform(cat_values)
-                    train_data["metadata"][cat_name] = torch.LongTensor(encoded)
-
-            train_data["targets"] = torch.FloatTensor(targets.values)
-
-            # Split data (simplified - should split properly)
-            split_idx = int(len(sensor_data) * (1 - test_size))
-            train_split = {k: v[:split_idx] for k, v in train_data.items()}
-            val_split = {k: v[split_idx:] for k, v in train_data.items()}
-
-            # Train
-            await multimodal.train(train_split, val_split, epochs=20)
-
-            results = {
-                "training_time": time.time() - start_time,
-                "modalities": list(multimodal.encoders.keys()),
-                "model_saved": True,
-                "timestamp": datetime.now().isoformat(),
-            }
-
-            logger.info("Multi-modal training completed")
-            return results
-
-        except Exception as e:
-            logger.error(f"Multi-modal training failed: {e}")
-            raise
-
-    async def quantum_enhanced_training(
+    def quantum_enhanced_training(
         self,
         X: pd.DataFrame,
         y: pd.Series,
@@ -446,162 +312,36 @@ class AutoMLEngine:
         use_quantum_prediction: bool = True,
     ) -> Dict[str, Any]:
         """
-        Train models with quantum-enhanced capabilities.
-
-        Args:
-            X: Feature matrix
-            y: Target variable
-            problem_type: 'regression', 'classification', or 'auto'
-            test_size: Test set size
-            use_quantum_prediction: Whether to use quantum for final predictions
-
-        Returns:
-            Training results with quantum enhancements
+        Train models with quantum-enhanced capabilities. (Not implemented)
         """
-        start_time = time.time()
+        logger.warning("quantum_enhanced_training is not implemented in this version.")
+        return self.auto_train(X, y, problem_type, test_size)
 
-        try:
-            logger.info("Starting quantum-enhanced AutoML training")
-
-            # First run standard AutoML
-            standard_results = await self.auto_train(X, y, problem_type, test_size)
-
-            # Preprocess data for quantum
-            X_processed, y_processed, encoders = self._preprocess_data(
-                X, y, problem_type
-            )
-
-            # Split data
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_processed.values,
-                y_processed,
-                test_size=test_size,
-                random_state=42,
-                stratify=y_processed if problem_type == "classification" else None,
-            )
-
-            quantum_results = {}
-
-            if use_quantum_prediction:
-                # Use quantum-enhanced prediction
-                quantum_predictions = self.quantum_ml.quantum_enhanced_prediction(
-                    X_test, model_type="hybrid"
-                )
-
-                # Evaluate quantum predictions
-                if problem_type == "regression":
-                    quantum_metrics = {
-                        "mse": mean_squared_error(y_test, quantum_predictions),
-                        "mae": mean_absolute_error(y_test, quantum_predictions),
-                        "r2": r2_score(y_test, quantum_predictions),
-                    }
-                else:
-                    quantum_predictions_binary = (quantum_predictions > 0.5).astype(int)
-                    quantum_metrics = {
-                        "accuracy": accuracy_score(y_test, quantum_predictions_binary),
-                        "f1": f1_score(
-                            y_test, quantum_predictions_binary, average="weighted"
-                        ),
-                    }
-
-                quantum_results["quantum_predictions"] = {
-                    "predictions": quantum_predictions.tolist(),
-                    "metrics": quantum_metrics,
-                }
-
-                # Compare with classical
-                classical_score = standard_results["best_score"]
-                quantum_score = quantum_metrics.get("r2", quantum_metrics.get("f1", 0))
-
-                if quantum_score > classical_score:
-                    logger.info(
-                        f"Quantum model better: {quantum_score:.4f} vs {classical_score:.4f}"
-                    )
-                    quantum_results["quantum_better"] = True
-                else:
-                    quantum_results["quantum_better"] = False
-
-            # Use quantum optimizer for hyperparameter tuning
-            hyperparam_optimization = self._quantum_hyperparameter_optimization(
-                X_train, y_train, problem_type
-            )
-            quantum_results["hyperparameter_optimization"] = hyperparam_optimization
-
-            # Combine results
-            enhanced_results = standard_results.copy()
-            enhanced_results["quantum_enhancements"] = quantum_results
-            enhanced_results["training_time"] = time.time() - start_time
-
-            logger.info("Quantum-enhanced training completed")
-            return enhanced_results
-
-        except Exception as e:
-            logger.error(f"Quantum-enhanced training failed: {e}")
-            # Fallback to standard training
-            return await self.auto_train(X, y, problem_type, test_size)
-
-    async def optimize_model_for_edge_deployment(
+    def optimize_model_for_edge_deployment(
         self, calibration_data_path: str, target_device: str = "cpu"
     ) -> Dict[str, Any]:
         """
-        Optimize trained model for edge deployment.
-
-        Args:
-            calibration_data_path: Path to calibration data
-            target_device: Target edge device
-
-        Returns:
-            Optimization results
+        Optimize trained model for edge deployment. (Not implemented)
         """
-        if not self.best_model:
-            raise ValueError("No trained model available for optimization")
+        logger.warning("optimize_model_for_edge_deployment is not implemented in this version.")
+        raise NotImplementedError
 
-        try:
-            logger.info("Starting edge optimization")
-
-            # Load calibration data
-            calibration_df = pd.read_csv(calibration_data_path)
-            X_cal = self._preprocess_data(
-                calibration_df, pd.Series([0] * len(calibration_df)), "regression"
-            )[0]
-            X_cal_tensor = torch.FloatTensor(X_cal.values)
-
-            # Create calibration dataset
-            cal_dataset = TensorDataset(X_cal_tensor, torch.zeros(len(X_cal_tensor)))
-            cal_loader = DataLoader(cal_dataset, batch_size=32)
-
-            # Convert sklearn model to PyTorch (simplified - would need proper conversion)
-            # For now, assume we have a PyTorch model or create a simple wrapper
-            pytorch_model = self._convert_to_pytorch_model()
-
-            # Optimize for edge
-            optimization_results = await optimize_model_for_edge(
-                pytorch_model, cal_loader, target_device
-            )
-
-            logger.info("Edge optimization completed")
-            return optimization_results
-
-        except Exception as e:
-            logger.error(f"Edge optimization failed: {e}")
-            raise
-
-    def _convert_to_pytorch_model(self) -> nn.Module:
-        """Convert sklearn model to PyTorch model (simplified)."""
-
-        # This is a placeholder - real implementation would convert the trained model
-        class SklearnWrapper(nn.Module):
-            def __init__(self, sklearn_model):
-                super().__init__()
-                self.sklearn_model = sklearn_model
-
-            def forward(self, x):
-                # Convert tensor to numpy, predict, convert back
-                x_np = x.detach().cpu().numpy()
-                predictions = self.sklearn_model.predict(x_np)
-                return torch.from_numpy(predictions).float()
-
-        return SklearnWrapper(self.best_model)
+    # def _convert_to_pytorch_model(self) -> nn.Module:
+    #     """Convert sklearn model to PyTorch model (simplified)."""
+    #
+    #     # This is a placeholder - real implementation would convert the trained model
+    #     class SklearnWrapper(nn.Module):
+    #         def __init__(self, sklearn_model):
+    #             super().__init__()
+    #             self.sklearn_model = sklearn_model
+    #
+    #         def forward(self, x):
+    #             # Convert tensor to numpy, predict, convert back
+    #             x_np = x.detach().cpu().numpy()
+    #             predictions = self.sklearn_model.predict(x_np)
+    #             return torch.from_numpy(predictions).float()
+    #
+    #     return SklearnWrapper(self.best_model)
 
     def _preprocess_data(
         self, X: pd.DataFrame, y: pd.Series, problem_type: str
@@ -876,3 +616,73 @@ class AutoMLEngine:
 
 # Global AutoML instance
 automl_engine = AutoMLEngine()
+
+if __name__ == '__main__':
+    # --- Демонстрационна симулация ---
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    # 1. Създаване на инстанция на енджина
+    engine = AutoMLEngine(model_dir="automl_models_output")
+
+    # 2. Генериране на примерен набор от данни за класификация
+    from sklearn.datasets import make_classification
+    X, y = make_classification(
+        n_samples=500,
+        n_features=10,
+        n_informative=5,
+        n_redundant=2,
+        n_classes=2,
+        random_state=42
+    )
+    X = pd.DataFrame(X, columns=[f'feature_{i}' for i in range(10)])
+    y = pd.Series(y, name='target')
+
+    print("\n--- Форма на данните преди AutoML ---")
+    print(X.shape)
+    print("-" * 40)
+
+    # 3. Изпълнение на AutoML с автоматично генериране на признаци
+    results = engine.auto_train(
+        X,
+        y,
+        problem_type='classification',
+        feature_engineering=True # Включваме новата функционалност
+    )
+
+    # 4. Отпечатване на резултатите
+    print("\n\n--- AutoML РЕЗУЛТАТИ ---")
+    print(f"Най-добър модел: {results['best_model']}")
+    print(f"Най-добър F1-score (weighted): {results['best_score']:.4f}")
+    print(f"Път до запазения модел: {results['model_path']}")
+
+    print("\n--- Класация на моделите ---")
+    leaderboard = pd.DataFrame(results['model_results']).T.sort_values(by='score', ascending=False)
+    print(leaderboard[['score', 'cv_score', 'training_time']])
+    print("-" * 40)
+
+    # 5. Зареждане на запазения модел и използване за прогноза
+    if results.get('model_path'):
+        print("\n--- Тестване на заредения модел ---")
+        engine.load_model(results['model_path'])
+
+        # Създаване на нови данни за прогноза
+        X_new, _ = make_classification(
+            n_samples=5,
+            n_features=10, # Трябва да съответства на оригиналните данни
+            n_informative=5,
+            n_redundant=2,
+            n_classes=2,
+            random_state=7
+        )
+        X_new = pd.DataFrame(X_new, columns=[f'feature_{i}' for i in range(10)])
+
+        print("Нови данни за прогноза:")
+        print(X_new)
+
+        # Важно: Трябва да приложим същите трансформации (генериране на признаци)
+        # В реална система, това ще се управлява от pipeline обекта
+        X_new_featured = engine._auto_feature_engineering(X_new)
+
+        predictions = engine.predict(X_new_featured)
+        print(f"\nПрогнози: {predictions}")
+        print("-" * 40)

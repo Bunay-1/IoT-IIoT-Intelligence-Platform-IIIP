@@ -13,3 +13,4 @@ __pycache__/
 *$py.class
 mlruns/
 audit_log.json
+automl_models_output/
