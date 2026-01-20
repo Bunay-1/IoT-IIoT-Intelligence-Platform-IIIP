@@ -24,12 +24,13 @@ class AutomatedMLOps:
         self.client = mlflow.tracking.MlflowClient()
         self.training_data_reference = None
 
-    def train_and_log(self, data, params, run_name="training_run"):
+    def train_and_log(self, data, params, model_name, run_name="training_run"):
         """
         Обучава, оценява и логва модел в MLflow.
         Args:
             data (pd.DataFrame): Данни за обучение с колона 'label'.
             params (dict): Хиперпараметри за модела RandomForestClassifier.
+            model_name (str): Име, под което да се регистрира моделът.
             run_name (str): Име за текущото изпълнение в MLflow.
         """
         with mlflow.start_run(run_name=run_name) as run:
@@ -67,10 +68,10 @@ class AutomatedMLOps:
             mlflow.sklearn.log_model(
                 sk_model=model,
                 artifact_path="model",
-                registered_model_name="automated_ml_model"
+                registered_model_name=model_name
             )
 
-            print(f"--- Run {run_name} finished. Model logged. ---")
+            print(f"--- Run {run_name} finished. Model '{model_name}' logged. ---")
             return run_id
 
     def check_for_data_drift(self, new_data, reference_data, feature, p_value_threshold=0.05):
@@ -91,7 +92,7 @@ class AutomatedMLOps:
             return True
         return False
 
-    def monitor_and_retrain_if_needed(self, new_data, params):
+    def monitor_and_retrain_if_needed(self, new_data, params, model_name):
         """
         Следи за дрейф и ако го засече, стартира преобучение.
         """
@@ -107,7 +108,7 @@ class AutomatedMLOps:
 
         if drift_detected:
             print("--- Data drift confirmed. Triggering model retraining... ---")
-            self.train_and_log(new_data, params, run_name="retraining_run_due_to_drift")
+            self.train_and_log(new_data, params, model_name, run_name="retraining_run_due_to_drift")
             # След преобучение, новите данни стават референтни
             self.training_data_reference = new_data.drop("label", axis=1, errors='ignore').copy()
             print("  Updated training data reference to new data distribution.")
@@ -202,7 +203,7 @@ if __name__ == "__main__":
 
     print("\n\n--- Scenario 1: Training and deploying initial model version ---")
     base_params = {"n_estimators": 50, "max_depth": 5}
-    ml_ops.train_and_log(data, base_params, run_name="baseline_model_run")
+    ml_ops.train_and_log(data, base_params, MODEL_NAME, run_name="baseline_model_run")
     initial_version = ml_ops.client.get_latest_versions(MODEL_NAME, stages=["None"])[0]
     ml_ops.transition_model_stage(MODEL_NAME, initial_version.version, "Staging")
     print("\nInitial model passed tests, promoting to Production for the first time.")
@@ -210,14 +211,14 @@ if __name__ == "__main__":
 
     print("\n\n--- Scenario 2: Training an improved model ---")
     improved_params = {"n_estimators": 100, "max_depth": 10}
-    ml_ops.train_and_log(data, improved_params, run_name="improved_model_run")
+    ml_ops.train_and_log(data, improved_params, MODEL_NAME, run_name="improved_model_run")
     improved_version = ml_ops.client.get_latest_versions(MODEL_NAME, stages=["None"])[0]
     ml_ops.transition_model_stage(MODEL_NAME, improved_version.version, "Staging")
     ml_ops.promote_model_to_production(MODEL_NAME)
 
     print("\n\n--- Scenario 3: Training a weaker model ---")
     weaker_params = {"n_estimators": 10, "max_depth": 3}
-    ml_ops.train_and_log(data, weaker_params, run_name="weaker_model_run")
+    ml_ops.train_and_log(data, weaker_params, MODEL_NAME, run_name="weaker_model_run")
     weaker_version = ml_ops.client.get_latest_versions(MODEL_NAME, stages=["None"])[0]
     ml_ops.transition_model_stage(MODEL_NAME, weaker_version.version, "Staging")
     ml_ops.promote_model_to_production(MODEL_NAME)
@@ -234,7 +235,7 @@ if __name__ == "__main__":
     drifted_data["label"] = y_drifted
 
     # Мониторинг, който трябва да засече дрейфа и да стартира преобучение
-    ml_ops.monitor_and_retrain_if_needed(drifted_data, improved_params)
+    ml_ops.monitor_and_retrain_if_needed(drifted_data, improved_params, MODEL_NAME)
 
     # Проверяваме дали е регистриран нов модел и го преместваме в Staging
     retrained_version = ml_ops.client.get_latest_versions(MODEL_NAME, stages=["None"])
