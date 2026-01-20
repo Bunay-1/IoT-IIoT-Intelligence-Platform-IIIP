@@ -1,0 +1,28 @@
+{
+    "experiment_name": "Automated_ML_Pipeline_Experiment",
+    "model_name": "pipeline_trained_model",
+    "tracking_uri": "mlruns",
+    "data_generation": {
+        "n_samples": 1500,
+        "n_features": 15,
+        "n_informative": 10,
+        "random_state": 42
+    },
+    "training_params": {
+        "baseline": {
+            "n_estimators": 50,
+            "max_depth": 5
+        },
+        "improved": {
+            "n_estimators": 150,
+            "max_depth": 15
+        }
+    },
+    "drift_simulation": {
+        "n_samples": 1000,
+        "n_features": 15,
+        "n_informative": 10,
+        "random_state": 123,
+        "shift": 3.5
+    }
+}
