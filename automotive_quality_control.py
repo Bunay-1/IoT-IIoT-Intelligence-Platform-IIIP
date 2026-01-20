@@ -10,11 +10,12 @@ This module implements comprehensive automotive quality control including:
 - Quality assurance workflows
 """
 
-import asyncio
 import json
 import logging
 import time
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 from enum import Enum
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class QualityStandard(Enum):
@@ -158,7 +160,7 @@ class AutomotiveQualityControl:
             }
         }
     
-    async def create_inspection(
+    def create_inspection(
         self,
         component_id: str,
         component_type: ComponentType,
@@ -180,7 +182,7 @@ class AutomotiveQualityControl:
             )
             
             # Perform quality assessment
-            quality_result = await self._assess_quality(
+            quality_result = self._assess_quality(
                 measurements, tolerances, component_type
             )
             
@@ -206,10 +208,10 @@ class AutomotiveQualityControl:
             
             # Record defects if any
             for defect in inspection.defects:
-                await self._record_defect(defect, inspection_id, component_id)
+                self._record_defect(defect, inspection_id, component_id)
             
             # Update quality metrics
-            await self._update_quality_metrics(component_type, inspection)
+            self._update_quality_metrics(component_type, inspection)
             
             logger.info(f"Quality inspection created: {inspection_id}")
             
@@ -245,7 +247,7 @@ class AutomotiveQualityControl:
             "pressure": (0, 1000)
         }
     
-    async def _assess_quality(
+    def _assess_quality(
         self,
         measurements: Dict[str, float],
         tolerances: Dict[str, Tuple[float, float]],
@@ -355,7 +357,7 @@ class AutomotiveQualityControl:
         else:
             return f"Poor quality - {len(defects)} defects found, review required"
     
-    async def _record_defect(
+    def _record_defect(
         self,
         defect_data: Dict[str, Any],
         inspection_id: str,
@@ -388,7 +390,7 @@ class AutomotiveQualityControl:
         random_suffix = "".join([format(np.random.randint(0, 9), 'd') for _ in range(4)])
         return f"DEF_{timestamp}_{random_suffix}"
     
-    async def _update_quality_metrics(
+    def _update_quality_metrics(
         self,
         component_type: ComponentType,
         inspection: QualityInspection
@@ -436,7 +438,7 @@ class AutomotiveQualityControl:
         
         metrics["last_updated"] = datetime.now()
     
-    async def update_defect_status(
+    def update_defect_status(
         self,
         defect_id: str,
         status: str,
@@ -470,7 +472,7 @@ class AutomotiveQualityControl:
             logger.error(f"Failed to update defect status: {e}")
             return {"error": f"Defect status update failed: {e}"}
     
-    async def generate_quality_report(
+    def generate_quality_report(
         self,
         report_type: str,
         start_date: datetime,
@@ -488,13 +490,13 @@ class AutomotiveQualityControl:
             
             # Generate report based on type
             if report_type == "summary":
-                report = await self._generate_summary_report(filtered_inspections)
+                report = self._generate_summary_report(filtered_inspections)
             elif report_type == "detailed":
-                report = await self._generate_detailed_report(filtered_inspections)
+                report = self._generate_detailed_report(filtered_inspections)
             elif report_type == "trends":
-                report = await self._generate_trends_report(filtered_inspections, start_date, end_date)
+                report = self._generate_trends_report(filtered_inspections, start_date, end_date)
             elif report_type == "compliance":
-                report = await self._generate_compliance_report(filtered_inspections)
+                report = self._generate_compliance_report(filtered_inspections)
             else:
                 return {"error": f"Unsupported report type: {report_type}"}
             
@@ -516,7 +518,7 @@ class AutomotiveQualityControl:
             logger.error(f"Failed to generate quality report: {e}")
             return {"error": f"Report generation failed: {e}"}
     
-    async def _generate_summary_report(self, inspections: List[QualityInspection]) -> Dict[str, Any]:
+    def _generate_summary_report(self, inspections: List[QualityInspection]) -> Dict[str, Any]:
         """Generate summary quality report."""
         total_inspections = len(inspections)
         if total_inspections == 0:
@@ -560,7 +562,7 @@ class AutomotiveQualityControl:
             "component_breakdown": component_stats
         }
     
-    async def _generate_detailed_report(self, inspections: List[QualityInspection]) -> Dict[str, Any]:
+    def _generate_detailed_report(self, inspections: List[QualityInspection]) -> Dict[str, Any]:
         """Generate detailed quality report."""
         inspection_details = []
         
@@ -586,7 +588,7 @@ class AutomotiveQualityControl:
             "inspections": inspection_details
         }
     
-    async def _generate_trends_report(
+    def _generate_trends_report(
         self,
         inspections: List[QualityInspection],
         start_date: datetime,
@@ -636,7 +638,7 @@ class AutomotiveQualityControl:
             }
         }
     
-    async def _generate_compliance_report(self, inspections: List[QualityInspection]) -> Dict[str, Any]:
+    def _generate_compliance_report(self, inspections: List[QualityInspection]) -> Dict[str, Any]:
         """Generate compliance report."""
         compliance_scores = {}
         
@@ -664,7 +666,7 @@ class AutomotiveQualityControl:
             )
         }
     
-    async def get_quality_alerts(self) -> Dict[str, Any]:
+    def get_quality_alerts(self) -> Dict[str, Any]:
         """Get quality alerts and notifications."""
         alerts = []
         
@@ -738,159 +740,193 @@ automotive_quality_control = AutomotiveQualityControl()
 automotive_quality = automotive_quality_control
 
 
-async def create_quality_inspection(
-    component_id: str,
-    component_type: ComponentType,
-    inspection_type: InspectionType,
-    inspector_id: str,
-    location: str,
-    measurements: Dict[str, float],
-    standards: Optional[List[QualityStandard]] = None
-) -> Dict[str, Any]:
-    """Create quality inspection."""
-    return await automotive_quality_control.create_inspection(
-        component_id, component_type, inspection_type, inspector_id, location, measurements, standards
-    )
+class StatisticalProcessControl:
+    """Клас за извършване на Статистически Процесен Контрол (SPC)."""
 
-
-async def update_defect_status(
-    defect_id: str,
-    status: str,
-    corrective_action: Optional[str] = None,
-    root_cause: Optional[str] = None
-) -> Dict[str, Any]:
-    """Update defect status."""
-    return await automotive_quality_control.update_defect_status(
-        defect_id, status, corrective_action, root_cause
-    )
-
-
-async def generate_quality_report(
-    report_type: str,
-    start_date: datetime,
-    end_date: datetime,
-    component_types: Optional[List[ComponentType]] = None
-) -> Dict[str, Any]:
-    """Generate quality report."""
-    return await automotive_quality_control.generate_quality_report(
-        report_type, start_date, end_date, component_types
-    )
-
-
-async def get_quality_alerts() -> Dict[str, Any]:
-    """Get quality alerts."""
-    return await automotive_quality_control.get_quality_alerts()
-
-
-def get_automotive_quality_metrics() -> Dict[str, Any]:
-    """Get quality metrics."""
-    return automotive_quality_control.get_quality_metrics()
-
-
-async def create_apqp_project(
-    project_name: str,
-    project_type: str,
-    start_date: datetime,
-    target_date: datetime,
-    team_members: List[str]
-) -> Dict[str, Any]:
-    """Create APQP project."""
-    return {
-        "success": True,
-        "project_id": f"APQP_{int(time.time())}",
-        "project_name": project_name,
-        "project_type": project_type,
-        "start_date": start_date.isoformat(),
-        "target_date": target_date.isoformat(),
-        "team_members": team_members,
-        "status": "created",
-        "created_at": datetime.now().isoformat()
-    }
-
-
-async def generate_quality_report(
-    report_type: str,
-    start_date: datetime,
-    end_date: datetime,
-    filters: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """Generate quality report."""
-    return {
-        "success": True,
-        "report_id": f"QR_{int(time.time())}",
-        "report_type": report_type,
-        "period": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat()
-        },
-        "filters": filters or {},
-        "generated_at": datetime.now().isoformat(),
-        "summary": {
-            "total_inspections": 150,
-            "pass_rate": 96.5,
-            "total_defects": 12,
-            "critical_defects": 2
+    def __init__(self):
+        # Константи за контролни карти (за n <= 10)
+        self.control_chart_constants = {
+            2: {'A2': 1.880, 'D3': 0, 'D4': 3.267},
+            3: {'A2': 1.023, 'D3': 0, 'D4': 2.574},
+            4: {'A2': 0.729, 'D3': 0, 'D4': 2.282},
+            5: {'A2': 0.577, 'D3': 0, 'D4': 2.114},
+            6: {'A2': 0.483, 'D3': 0, 'D4': 2.004},
+            7: {'A2': 0.419, 'D3': 0.076, 'D4': 1.924},
+            8: {'A2': 0.373, 'D3': 0.136, 'D4': 1.864},
+            9: {'A2': 0.337, 'D3': 0.184, 'D4': 1.816},
+            10: {'A2': 0.308, 'D3': 0.223, 'D4': 1.777},
         }
-    }
+
+    def calculate_control_limits(self, data: pd.DataFrame):
+        """
+        Изчислява контролните лимити за X-bar и R карти.
+        Args:
+            data (pd.DataFrame): DataFrame с измервания, където всяка колона е измерване, а всеки ред е извадка.
+        Returns:
+            dict: Речник, съдържащ изчислените контролни лимити.
+        """
+        n = data.shape[1]  # Размер на извадката
+        if n not in self.control_chart_constants:
+            raise ValueError(f"Размер на извадката {n} не се поддържа. Поддържат се стойности от 2 до 10.")
+
+        # Изчисляване на средните стойности (X-bar) и обхватите (R) за всяка извадка
+        x_bars = data.mean(axis=1)
+        ranges = data.max(axis=1) - data.min(axis=1)
+
+        # Изчисляване на централните линии
+        cl_x_bar = x_bars.mean()
+        cl_r = ranges.mean()
+
+        # Вземане на константите
+        constants = self.control_chart_constants[n]
+        A2, D3, D4 = constants['A2'], constants['D3'], constants['D4']
+
+        # Изчисляване на контролните лимити
+        ucl_x_bar = cl_x_bar + A2 * cl_r
+        lcl_x_bar = cl_x_bar - A2 * cl_r
+        ucl_r = D4 * cl_r
+        lcl_r = D3 * cl_r
+
+        limits = {
+            'x_bar': {'UCL': ucl_x_bar, 'CL': cl_x_bar, 'LCL': lcl_x_bar},
+            'r_chart': {'UCL': ucl_r, 'CL': cl_r, 'LCL': lcl_r},
+            'x_bars': x_bars,
+            'ranges': ranges
+        }
+        return limits
+
+    def analyze_process_data(self, new_data: pd.DataFrame, limits: dict):
+        """
+        Анализира нови данни спрямо изчислените контролни лимити.
+        Args:
+            new_data (pd.DataFrame): Нови измервания за анализ.
+            limits (dict): Контролни лимити, изчислени от `calculate_control_limits`.
+        Returns:
+            dict: Резултати от анализа, включително точки извън контрол.
+        """
+        x_bars = new_data.mean(axis=1)
+        ranges = new_data.max(axis=1) - new_data.min(axis=1)
+
+        # Проверка за точки извън контрол
+        x_bar_out_of_control = x_bars[(x_bars < limits['x_bar']['LCL']) | (x_bars > limits['x_bar']['UCL'])]
+        r_chart_out_of_control = ranges[(ranges < limits['r_chart']['LCL']) | (ranges > limits['r_chart']['UCL'])]
+
+        results = {
+            'x_bar_data': x_bars,
+            'r_chart_data': ranges,
+            'x_bar_out_of_control': x_bar_out_of_control,
+            'r_chart_out_of_control': r_chart_out_of_control,
+            'is_stable': len(x_bar_out_of_control) == 0 and len(r_chart_out_of_control) == 0
+        }
+        return results
+
+    def plot_control_charts(self, limits: dict, analysis_results: dict, filename_prefix: str):
+        """
+        Генерира и запазва графики на контролните карти.
+        """
+        plt.style.use('seaborn-v0_8-whitegrid')
+
+        # --- X-bar Карта ---
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(analysis_results['x_bar_data'].index, analysis_results['x_bar_data'], marker='o', linestyle='-', label='Средно (X-bar)')
+        ax.axhline(limits['x_bar']['UCL'], color='red', linestyle='--', label='UCL')
+        ax.axhline(limits['x_bar']['CL'], color='green', linestyle='-', label='CL')
+        ax.axhline(limits['x_bar']['LCL'], color='red', linestyle='--', label='LCL')
+
+        # Маркиране на точки извън контрол
+        outliers = analysis_results['x_bar_out_of_control']
+        if not outliers.empty:
+            ax.scatter(outliers.index, outliers.values, color='red', s=100, zorder=5, label='Извън контрол')
+
+        ax.set_title('X-bar Control Chart')
+        ax.set_xlabel('Номер на извадка')
+        ax.set_ylabel('Средна стойност')
+        ax.legend()
+        plt.tight_layout()
+        x_bar_filename = f"{filename_prefix}_x_bar_chart.png"
+        plt.savefig(x_bar_filename)
+        plt.close()
+        logger.info(f"X-bar картата е запазена в {x_bar_filename}")
+
+        # --- R Карта ---
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(analysis_results['r_chart_data'].index, analysis_results['r_chart_data'], marker='o', linestyle='-', label='Обхват (R)')
+        ax.axhline(limits['r_chart']['UCL'], color='red', linestyle='--', label='UCL')
+        ax.axhline(limits['r_chart']['CL'], color='green', linestyle='-', label='CL')
+        ax.axhline(limits['r_chart']['LCL'], color='red', linestyle='--', label='LCL')
+
+        # Маркиране на точки извън контрол
+        outliers = analysis_results['r_chart_out_of_control']
+        if not outliers.empty:
+            ax.scatter(outliers.index, outliers.values, color='red', s=100, zorder=5, label='Извън контрол')
+
+        ax.set_title('R-Chart (Range Control Chart)')
+        ax.set_xlabel('Номер на извадка')
+        ax.set_ylabel('Обхват')
+        ax.legend()
+        plt.tight_layout()
+        r_chart_filename = f"{filename_prefix}_r_chart.png"
+        plt.savefig(r_chart_filename)
+        plt.close()
+        logger.info(f"R картата е запазена в {r_chart_filename}")
+
+        return x_bar_filename, r_chart_filename
 
 
-async def report_non_conformance(
-    part_number: str,
-    defect_type: str,
-    severity: str,
-    description: str,
-    reported_by: str
-) -> Dict[str, Any]:
-    """Report non-conformance."""
-    return {
-        "success": True,
-        "ncr_id": f"NCR_{int(time.time())}",
-        "part_number": part_number,
-        "defect_type": defect_type,
-        "severity": severity,
-        "description": description,
-        "reported_by": reported_by,
-        "status": "open",
-        "reported_at": datetime.now().isoformat()
-    }
+if __name__ == '__main__':
 
+    def generate_spc_data(num_samples, sample_size, mean=10.0, std_dev=0.5, shift=0.0):
+        """Генерира симулирани данни за SPC анализ."""
+        data = np.random.normal(loc=mean + shift, scale=std_dev, size=(num_samples, sample_size))
+        return pd.DataFrame(data, columns=[f'meas_{i+1}' for i in range(sample_size)])
 
-async def submit_ppap(
-    part_number: str,
-    revision: str,
-    submission_level: int,
-    documents: List[str],
-    submitted_by: str
-) -> Dict[str, Any]:
-    """Submit PPAP."""
-    return {
-        "success": True,
-        "ppap_id": f"PPAP_{int(time.time())}",
-        "part_number": part_number,
-        "revision": revision,
-        "submission_level": submission_level,
-        "documents": documents,
-        "submitted_by": submitted_by,
-        "status": "submitted",
-        "submitted_at": datetime.now().isoformat()
-    }
+    # --- Демонстрация на Статистически Процесен Контрол (SPC) ---
+    print("\n" + "="*50)
+    print("ДЕМОНСТРАЦИЯ НА СТАТИСТИЧЕСКИ ПРОЦЕСЕН КОНТРОЛ (SPC)")
+    print("="*50 + "\n")
 
+    # 1. Инициализация на SPC модула
+    spc = StatisticalProcessControl()
 
-async def update_spc_data(
-    part_number: str,
-    characteristic: str,
-    measurement: float,
-    timestamp: datetime,
-    operator: str
-) -> Dict[str, Any]:
-    """Update SPC data."""
-    return {
-        "success": True,
-        "data_id": f"SPC_{int(time.time())}",
-        "part_number": part_number,
-        "characteristic": characteristic,
-        "measurement": measurement,
-        "timestamp": timestamp.isoformat(),
-        "operator": operator,
-        "updated_at": datetime.now().isoformat()
-    }
+    # 2. Генериране на стабилни данни за калибрация
+    # 20 извадки с по 5 измервания всяка
+    sample_size = 5
+    stable_data = generate_spc_data(num_samples=20, sample_size=sample_size, mean=25.0, std_dev=1.0)
+    logger.info(f"Генерирани са {len(stable_data)} стабилни извадки за изчисляване на контролни лимити.")
+
+    # 3. Изчисляване на контролните лимити
+    try:
+        control_limits = spc.calculate_control_limits(stable_data)
+        logger.info(f"Изчислени X-bar лимити: LCL={control_limits['x_bar']['LCL']:.3f}, CL={control_limits['x_bar']['CL']:.3f}, UCL={control_limits['x_bar']['UCL']:.3f}")
+        logger.info(f"Изчислени R-chart лимити: LCL={control_limits['r_chart']['LCL']:.3f}, CL={control_limits['r_chart']['CL']:.3f}, UCL={control_limits['r_chart']['UCL']:.3f}")
+
+        # 4. Генериране на нови данни с дефекти (промяна в процеса)
+        # 15 нови извадки, като последните 5 имат променена средна стойност
+        new_stable_data = generate_spc_data(num_samples=10, sample_size=sample_size, mean=25.0, std_dev=1.0)
+        shifted_data = generate_spc_data(num_samples=5, sample_size=sample_size, mean=25.0, std_dev=1.0, shift=2.5) # Промяна!
+        process_data = pd.concat([new_stable_data, shifted_data], ignore_index=True)
+        logger.info(f"Генерирани са {len(process_data)} нови извадки, някои от които с аномалии.")
+
+        # 5. Анализ на новите данни
+        analysis = spc.analyze_process_data(process_data, control_limits)
+
+        if analysis['is_stable']:
+            logger.info("Процесът е СТАБИЛЕН. Не са открити точки извън контрол.")
+        else:
+            logger.warning("Процесът е НЕСТАБИЛЕН. Открити са точки извън контрол!")
+            if not analysis['x_bar_out_of_control'].empty:
+                print("\nТочки извън контрол (X-bar):")
+                print(analysis['x_bar_out_of_control'])
+            if not analysis['r_chart_out_of_control'].empty:
+                print("\nТочки извън контрол (R-chart):")
+                print(analysis['r_chart_out_of_control'])
+
+        # 6. Генериране на визуални отчети (контролни карти)
+        spc.plot_control_charts(control_limits, analysis, filename_prefix="spc_analysis_report")
+
+    except ValueError as e:
+        logger.error(f"Грешка при SPC анализ: {e}")
+
+    print("\n" + "="*50)
+    print("ДЕМОНСТРАЦИЯТА НА SPC ПРИКЛЮЧИ")
+    print("="*50 + "\n")
