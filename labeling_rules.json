@@ -1,0 +1,18 @@
+{
+    "Electronics": {
+        "keywords": ["smartphone", "laptop", "tablet", "headphones", "camera"],
+        "regex": ["(4K|HD|LED) TV", "gaming console"]
+    },
+    "Apparel": {
+        "keywords": ["t-shirt", "jeans", "jacket", "dress", "sneakers"],
+        "regex": ["(cotton|wool) sweater", "(leather|running) shoes"]
+    },
+    "Home Goods": {
+        "keywords": ["sofa", "table", "chair", "lamp", "rug"],
+        "regex": ["coffee maker", "vacuum cleaner"]
+    },
+    "Books": {
+        "keywords": ["novel", "biography", "history", "science fiction"],
+        "regex": ["(hardcover|paperback) book"]
+    }
+}

@@ -1,7 +1,7 @@
 aiohttp==3.9.5
 cryptography==42.0.8
-dash==2.17.1
 dash-bootstrap-components==1.6.0
+dash==2.17.1
 dotenv==0.0.5
 fastapi==0.111.0
 matplotlib
