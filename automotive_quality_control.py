@@ -15,7 +15,7 @@ import logging
 import time
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 from enum import Enum
@@ -741,190 +741,165 @@ automotive_quality = automotive_quality_control
 
 
 class StatisticalProcessControl:
-    """Клас за извършване на Статистически Процесен Контрол (SPC)."""
+    """Клас за извършване на Статистически Процесен Контрол (SPC) за Dash GUI."""
 
-    def __init__(self):
-        # Константи за контролни карти (за n <= 10)
+    def __init__(self, data: pd.DataFrame, measurement_col: str, subgroup_size: int = 5):
+        if not isinstance(data, pd.DataFrame):
+            raise TypeError("Данните трябва да бъдат pandas DataFrame.")
+        if measurement_col not in data.columns:
+            raise ValueError(f"Колоната '{measurement_col}' не е намерена в DataFrame-а.")
+
+        self.data = data
+        self.measurement_col = measurement_col
+        self.subgroup_size = subgroup_size
+
+        # Константи за контролни карти
         self.control_chart_constants = {
-            2: {'A2': 1.880, 'D3': 0, 'D4': 3.267},
-            3: {'A2': 1.023, 'D3': 0, 'D4': 2.574},
-            4: {'A2': 0.729, 'D3': 0, 'D4': 2.282},
-            5: {'A2': 0.577, 'D3': 0, 'D4': 2.114},
-            6: {'A2': 0.483, 'D3': 0, 'D4': 2.004},
-            7: {'A2': 0.419, 'D3': 0.076, 'D4': 1.924},
-            8: {'A2': 0.373, 'D3': 0.136, 'D4': 1.864},
-            9: {'A2': 0.337, 'D3': 0.184, 'D4': 1.816},
+            2: {'A2': 1.880, 'D3': 0, 'D4': 3.267}, 3: {'A2': 1.023, 'D3': 0, 'D4': 2.574},
+            4: {'A2': 0.729, 'D3': 0, 'D4': 2.282}, 5: {'A2': 0.577, 'D3': 0, 'D4': 2.114},
+            6: {'A2': 0.483, 'D3': 0, 'D4': 2.004}, 7: {'A2': 0.419, 'D3': 0.076, 'D4': 1.924},
+            8: {'A2': 0.373, 'D3': 0.136, 'D4': 1.864}, 9: {'A2': 0.337, 'D3': 0.184, 'D4': 1.816},
             10: {'A2': 0.308, 'D3': 0.223, 'D4': 1.777},
         }
 
-    def calculate_control_limits(self, data: pd.DataFrame):
-        """
-        Изчислява контролните лимити за X-bar и R карти.
-        Args:
-            data (pd.DataFrame): DataFrame с измервания, където всяка колона е измерване, а всеки ред е извадка.
-        Returns:
-            dict: Речник, съдържащ изчислените контролни лимити.
-        """
-        n = data.shape[1]  # Размер на извадката
-        if n not in self.control_chart_constants:
-            raise ValueError(f"Размер на извадката {n} не се поддържа. Поддържат се стойности от 2 до 10.")
+        if self.subgroup_size not in self.control_chart_constants:
+            raise ValueError(f"Размер на подгрупа {self.subgroup_size} не се поддържа.")
 
-        # Изчисляване на средните стойности (X-bar) и обхватите (R) за всяка извадка
-        x_bars = data.mean(axis=1)
-        ranges = data.max(axis=1) - data.min(axis=1)
+        self._prepare_subgroups()
+        self.limits = {}
 
-        # Изчисляване на централните линии
-        cl_x_bar = x_bars.mean()
-        cl_r = ranges.mean()
+    def _prepare_subgroups(self):
+        """Разделя данните на подгрупи."""
+        self.data['subgroup'] = np.arange(len(self.data)) // self.subgroup_size
+        self.subgroups = self.data.groupby('subgroup')[self.measurement_col]
 
-        # Вземане на константите
-        constants = self.control_chart_constants[n]
+        self.x_bars = self.subgroups.mean()
+        self.ranges = self.subgroups.apply(lambda x: x.max() - x.min())
+
+    def calculate_control_limits(self):
+        """Изчислява контролните лимити за X-bar и R карти."""
+        cl_x_bar = self.x_bars.mean()
+        cl_r = self.ranges.mean()
+
+        constants = self.control_chart_constants[self.subgroup_size]
         A2, D3, D4 = constants['A2'], constants['D3'], constants['D4']
 
-        # Изчисляване на контролните лимити
         ucl_x_bar = cl_x_bar + A2 * cl_r
         lcl_x_bar = cl_x_bar - A2 * cl_r
         ucl_r = D4 * cl_r
         lcl_r = D3 * cl_r
 
-        limits = {
+        self.limits = {
             'x_bar': {'UCL': ucl_x_bar, 'CL': cl_x_bar, 'LCL': lcl_x_bar},
             'r_chart': {'UCL': ucl_r, 'CL': cl_r, 'LCL': lcl_r},
-            'x_bars': x_bars,
-            'ranges': ranges
         }
-        return limits
 
-    def analyze_process_data(self, new_data: pd.DataFrame, limits: dict):
-        """
-        Анализира нови данни спрямо изчислените контролни лимити.
-        Args:
-            new_data (pd.DataFrame): Нови измервания за анализ.
-            limits (dict): Контролни лимити, изчислени от `calculate_control_limits`.
-        Returns:
-            dict: Резултати от анализа, включително точки извън контрол.
-        """
-        x_bars = new_data.mean(axis=1)
-        ranges = new_data.max(axis=1) - new_data.min(axis=1)
+    def analyze(self) -> pd.DataFrame:
+        """Анализира данните и идентифицира точки извън контрол."""
+        if not self.limits:
+            self.calculate_control_limits()
 
-        # Проверка за точки извън контрол
-        x_bar_out_of_control = x_bars[(x_bars < limits['x_bar']['LCL']) | (x_bars > limits['x_bar']['UCL'])]
-        r_chart_out_of_control = ranges[(ranges < limits['r_chart']['LCL']) | (ranges > limits['r_chart']['UCL'])]
+        x_bar_out_of_control = (self.x_bars < self.limits['x_bar']['LCL']) | (self.x_bars > self.limits['x_bar']['UCL'])
+        r_chart_out_of_control = (self.ranges < self.limits['r_chart']['LCL']) | (self.ranges > self.limits['r_chart']['UCL'])
 
-        results = {
-            'x_bar_data': x_bars,
-            'r_chart_data': ranges,
-            'x_bar_out_of_control': x_bar_out_of_control,
-            'r_chart_out_of_control': r_chart_out_of_control,
-            'is_stable': len(x_bar_out_of_control) == 0 and len(r_chart_out_of_control) == 0
-        }
-        return results
+        analysis_df = pd.DataFrame({
+            'Subgroup': self.x_bars.index,
+            'X_bar': self.x_bars,
+            'Range': self.ranges,
+            'X_bar_OutOfControl': x_bar_out_of_control,
+            'R_chart_OutOfControl': r_chart_out_of_control
+        })
+        return analysis_df
 
-    def plot_control_charts(self, limits: dict, analysis_results: dict, filename_prefix: str):
-        """
-        Генерира и запазва графики на контролните карти.
-        """
-        plt.style.use('seaborn-v0_8-whitegrid')
+    def plot_x_bar_chart(self) -> go.Figure:
+        """Генерира X-bar контролна карта с Plotly."""
+        fig = go.Figure()
 
-        # --- X-bar Карта ---
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(analysis_results['x_bar_data'].index, analysis_results['x_bar_data'], marker='o', linestyle='-', label='Средно (X-bar)')
-        ax.axhline(limits['x_bar']['UCL'], color='red', linestyle='--', label='UCL')
-        ax.axhline(limits['x_bar']['CL'], color='green', linestyle='-', label='CL')
-        ax.axhline(limits['x_bar']['LCL'], color='red', linestyle='--', label='LCL')
+        # Линии на контролните лимити
+        fig.add_hline(y=self.limits['x_bar']['UCL'], line_dash="dash", line_color="red", annotation_text="UCL")
+        fig.add_hline(y=self.limits['x_bar']['CL'], line_dash="solid", line_color="green", annotation_text="CL")
+        fig.add_hline(y=self.limits['x_bar']['LCL'], line_dash="dash", line_color="red", annotation_text="LCL")
+
+        # Данни
+        fig.add_trace(go.Scatter(x=self.x_bars.index, y=self.x_bars, mode='lines+markers', name='Средно (X-bar)'))
 
         # Маркиране на точки извън контрол
-        outliers = analysis_results['x_bar_out_of_control']
-        if not outliers.empty:
-            ax.scatter(outliers.index, outliers.values, color='red', s=100, zorder=5, label='Извън контрол')
+        outliers = self.x_bars[(self.x_bars < self.limits['x_bar']['LCL']) | (self.x_bars > self.limits['x_bar']['UCL'])]
+        fig.add_trace(go.Scatter(x=outliers.index, y=outliers, mode='markers', marker_symbol='x', marker_color='red', marker_size=10, name='Извън контрол'))
 
-        ax.set_title('X-bar Control Chart')
-        ax.set_xlabel('Номер на извадка')
-        ax.set_ylabel('Средна стойност')
-        ax.legend()
-        plt.tight_layout()
-        x_bar_filename = f"{filename_prefix}_x_bar_chart.png"
-        plt.savefig(x_bar_filename)
-        plt.close()
-        logger.info(f"X-bar картата е запазена в {x_bar_filename}")
+        fig.update_layout(title_text='X-bar Control Chart', xaxis_title='Номер на подгрупа', yaxis_title='Средна стойност')
+        return fig
 
-        # --- R Карта ---
-        fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(analysis_results['r_chart_data'].index, analysis_results['r_chart_data'], marker='o', linestyle='-', label='Обхват (R)')
-        ax.axhline(limits['r_chart']['UCL'], color='red', linestyle='--', label='UCL')
-        ax.axhline(limits['r_chart']['CL'], color='green', linestyle='-', label='CL')
-        ax.axhline(limits['r_chart']['LCL'], color='red', linestyle='--', label='LCL')
+    def plot_r_chart(self) -> go.Figure:
+        """Генерира R-Chart контролна карта с Plotly."""
+        fig = go.Figure()
+
+        # Линии на контролните лимити
+        fig.add_hline(y=self.limits['r_chart']['UCL'], line_dash="dash", line_color="red", annotation_text="UCL")
+        fig.add_hline(y=self.limits['r_chart']['CL'], line_dash="solid", line_color="green", annotation_text="CL")
+        fig.add_hline(y=self.limits['r_chart']['LCL'], line_dash="dash", line_color="red", annotation_text="LCL")
+
+        # Данни
+        fig.add_trace(go.Scatter(x=self.ranges.index, y=self.ranges, mode='lines+markers', name='Обхват (R)'))
 
         # Маркиране на точки извън контрол
-        outliers = analysis_results['r_chart_out_of_control']
-        if not outliers.empty:
-            ax.scatter(outliers.index, outliers.values, color='red', s=100, zorder=5, label='Извън контрол')
+        outliers = self.ranges[(self.ranges < self.limits['r_chart']['LCL']) | (self.ranges > self.limits['r_chart']['UCL'])]
+        fig.add_trace(go.Scatter(x=outliers.index, y=outliers, mode='markers', marker_symbol='x', marker_color='red', marker_size=10, name='Извън контрол'))
 
-        ax.set_title('R-Chart (Range Control Chart)')
-        ax.set_xlabel('Номер на извадка')
-        ax.set_ylabel('Обхват')
-        ax.legend()
-        plt.tight_layout()
-        r_chart_filename = f"{filename_prefix}_r_chart.png"
-        plt.savefig(r_chart_filename)
-        plt.close()
-        logger.info(f"R картата е запазена в {r_chart_filename}")
-
-        return x_bar_filename, r_chart_filename
+        fig.update_layout(title_text='R-Chart (Range Control Chart)', xaxis_title='Номер на подгрупа', yaxis_title='Обхват')
+        return fig
 
 
 if __name__ == '__main__':
 
-    def generate_spc_data(num_samples, sample_size, mean=10.0, std_dev=0.5, shift=0.0):
-        """Генерира симулирани данни за SPC анализ."""
-        data = np.random.normal(loc=mean + shift, scale=std_dev, size=(num_samples, sample_size))
-        return pd.DataFrame(data, columns=[f'meas_{i+1}' for i in range(sample_size)])
+    def generate_spc_data_single_col(num_points, mean=10.0, std_dev=0.5, shift_point=None, shift_value=0.0):
+        """Генерира симулирани данни за SPC анализ в една колона."""
+        data = np.random.normal(loc=mean, scale=std_dev, size=num_points)
+        if shift_point is not None:
+            data[shift_point:] += shift_value
+        return pd.DataFrame({'measurement': data})
 
     # --- Демонстрация на Статистически Процесен Контрол (SPC) ---
     print("\n" + "="*50)
     print("ДЕМОНСТРАЦИЯ НА СТАТИСТИЧЕСКИ ПРОЦЕСЕН КОНТРОЛ (SPC)")
     print("="*50 + "\n")
 
-    # 1. Инициализация на SPC модула
-    spc = StatisticalProcessControl()
+    # 1. Генериране на данни (150 измервания, което е 30 подгрупи по 5)
+    # Промяна в процеса настъпва след 100-тната точка
+    process_data = generate_spc_data_single_col(150, mean=25.0, std_dev=1.0, shift_point=100, shift_value=1.5)
+    logger.info(f"Генерирани са {len(process_data)} измервания с аномалия след 100-тната точка.")
 
-    # 2. Генериране на стабилни данни за калибрация
-    # 20 извадки с по 5 измервания всяка
-    sample_size = 5
-    stable_data = generate_spc_data(num_samples=20, sample_size=sample_size, mean=25.0, std_dev=1.0)
-    logger.info(f"Генерирани са {len(stable_data)} стабилни извадки за изчисляване на контролни лимити.")
-
-    # 3. Изчисляване на контролните лимити
+    # 2. Инициализация на SPC класа
     try:
-        control_limits = spc.calculate_control_limits(stable_data)
-        logger.info(f"Изчислени X-bar лимити: LCL={control_limits['x_bar']['LCL']:.3f}, CL={control_limits['x_bar']['CL']:.3f}, UCL={control_limits['x_bar']['UCL']:.3f}")
-        logger.info(f"Изчислени R-chart лимити: LCL={control_limits['r_chart']['LCL']:.3f}, CL={control_limits['r_chart']['CL']:.3f}, UCL={control_limits['r_chart']['UCL']:.3f}")
+        spc = StatisticalProcessControl(process_data, 'measurement', subgroup_size=5)
 
-        # 4. Генериране на нови данни с дефекти (промяна в процеса)
-        # 15 нови извадки, като последните 5 имат променена средна стойност
-        new_stable_data = generate_spc_data(num_samples=10, sample_size=sample_size, mean=25.0, std_dev=1.0)
-        shifted_data = generate_spc_data(num_samples=5, sample_size=sample_size, mean=25.0, std_dev=1.0, shift=2.5) # Промяна!
-        process_data = pd.concat([new_stable_data, shifted_data], ignore_index=True)
-        logger.info(f"Генерирани са {len(process_data)} нови извадки, някои от които с аномалии.")
+        # 3. Изчисляване на контролните лимити
+        spc.calculate_control_limits()
+        limits = spc.limits
+        logger.info(f"Изчислени X-bar лимити: LCL={limits['x_bar']['LCL']:.3f}, CL={limits['x_bar']['CL']:.3f}, UCL={limits['x_bar']['UCL']:.3f}")
+        logger.info(f"Изчислени R-chart лимити: LCL={limits['r_chart']['LCL']:.3f}, CL={limits['r_chart']['CL']:.3f}, UCL={limits['r_chart']['UCL']:.3f}")
 
-        # 5. Анализ на новите данни
-        analysis = spc.analyze_process_data(process_data, control_limits)
+        # 4. Анализ на процеса
+        analysis_results = spc.analyze()
+        unstable_points = analysis_results[analysis_results['X_bar_OutOfControl'] | analysis_results['R_chart_OutOfControl']]
 
-        if analysis['is_stable']:
-            logger.info("Процесът е СТАБИЛЕН. Не са открити точки извън контрол.")
+        if unstable_points.empty:
+            logger.info("Процесът е СТАБИЛЕН.")
         else:
             logger.warning("Процесът е НЕСТАБИЛЕН. Открити са точки извън контрол!")
-            if not analysis['x_bar_out_of_control'].empty:
-                print("\nТочки извън контрол (X-bar):")
-                print(analysis['x_bar_out_of_control'])
-            if not analysis['r_chart_out_of_control'].empty:
-                print("\nТочки извън контрол (R-chart):")
-                print(analysis['r_chart_out_of_control'])
+            print(unstable_points)
 
-        # 6. Генериране на визуални отчети (контролни карти)
-        spc.plot_control_charts(control_limits, analysis, filename_prefix="spc_analysis_report")
+        # 5. Генериране и показване на графики (в среда, която го поддържа)
+        logger.info("Генериране на Plotly графики. В интерактивна среда (напр. Jupyter) те ще се покажат.")
+        x_bar_fig = spc.plot_x_bar_chart()
+        r_chart_fig = spc.plot_r_chart()
 
-    except ValueError as e:
+        # За демонстрационни цели, можете да ги запишете в HTML файлове
+        x_bar_fig.write_html("x_bar_chart.html")
+        r_chart_fig.write_html("r_chart.html")
+        logger.info("Графиките са запазени като x_bar_chart.html и r_chart.html")
+
+    except (ValueError, TypeError) as e:
         logger.error(f"Грешка при SPC анализ: {e}")
 
     print("\n" + "="*50)
