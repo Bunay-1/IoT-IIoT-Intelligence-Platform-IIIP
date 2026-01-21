@@ -14,3 +14,4 @@ __pycache__/
 mlruns/
 audit_log.json
 automl_models_output/
+automotive_gui.log

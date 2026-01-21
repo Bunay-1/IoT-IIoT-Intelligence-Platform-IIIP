@@ -3,7 +3,6 @@ Automotive Quality Control GUI Module
 Interactive Dash-based interface for automotive quality management
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -12,22 +11,18 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 import dash
+import numpy as np
 
 # Load environment variables
 load_dotenv()
-from dash import Input, Output, State, dcc, html
+from dash import Input, Output, State, dcc, html, dash_table
 import dash_bootstrap_components as dbc
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dash.exceptions import PreventUpdate
 
-try:
-    from automotive_quality_control import automotive_quality
-    AUTOMOTIVE_QUALITY_AVAILABLE = True
-except ImportError:
-    AUTOMOTIVE_QUALITY_AVAILABLE = False
-    logger.warning("Automotive quality control module not available")
+from automotive_quality_control import automotive_quality, StatisticalProcessControl, ComponentType
 
 logger = logging.getLogger(__name__)
 
@@ -253,32 +248,14 @@ class AutomotiveQualityGUI:
         return html.Div([
             dbc.Row([
                 dbc.Col([
-                    html.H3("Statistical Process Control"),
-                    dbc.Button("Add New Chart", color="info", className="mb-3", id="create-spc-btn"),
+                    html.H3("Statistical Process Control (SPC) Simulation"),
+                    html.P("Натиснете бутона, за да стартирате нова симулация на производствен процес и да генерирате контролни карти."),
+                    dbc.Button("Стартирай SPC симулация", color="primary", className="mb-3", id="run-spc-sim-btn", n_clicks=0),
                 ], width=12)
             ]),
-
             dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("SPC Charts Overview"),
-                        dbc.CardBody([
-                            html.Div(id="spc-charts-grid")
-                        ])
-                    ])
-                ], width=12)
-            ]),
-
-            dbc.Row([
-                dbc.Col([
-                    dbc.Card([
-                        dbc.CardHeader("Selected Chart Details"),
-                        dbc.CardBody([
-                            dcc.Graph(id="spc-detail-chart")
-                        ])
-                    ])
-                ], width=12)
-            ]),
+                dbc.Col(dcc.Loading(id="loading-spc", children=html.Div(id="spc-simulation-output")), width=12)
+            ])
         ])
 
     def get_reports_content(self) -> html.Div:
@@ -455,7 +432,7 @@ class AutomotiveQualityGUI:
             elif button_id in ["cancel-apqp-btn", "submit-apqp-btn"]:
                 if button_id == "submit-apqp-btn" and product_id and title:
                     # Create new APQP project
-                    asyncio.run(self.create_apqp_project(product_id, title, customer, target_date))
+                    self.create_apqp_project(product_id, title, customer, target_date)
                 return False, self.get_apqp_projects_list()
 
             return is_open, self.get_apqp_projects_list()
@@ -486,7 +463,7 @@ class AutomotiveQualityGUI:
             elif button_id in ["cancel-ppap-btn", "submit-ppap-btn"]:
                 if button_id == "submit-ppap-btn" and product_id:
                     # Submit new PPAP
-                    asyncio.run(self.submit_ppap(product_id, level, supplier_id))
+                    self.submit_ppap(product_id, level, supplier_id)
                 return False, self.get_ppap_submissions_list()
 
             return is_open, self.get_ppap_submissions_list()
@@ -518,7 +495,7 @@ class AutomotiveQualityGUI:
             elif button_id in ["cancel-nc-btn", "submit-nc-btn"]:
                 if button_id == "submit-nc-btn" and description:
                     # Report new NC
-                    asyncio.run(self.report_non_conformance(description, severity, product_id, quantity))
+                    self.report_non_conformance(description, severity, product_id, quantity)
                 return False, self.get_nc_list()
 
             return is_open, self.get_nc_list()
@@ -536,16 +513,65 @@ class AutomotiveQualityGUI:
                 raise PreventUpdate
 
             # Generate report using automotive_quality module
-            report = asyncio.run(automotive_quality.generate_quality_report(
+            report = automotive_quality.generate_quality_report(
                 report_type, start_date, end_date
-            ))
+            )
 
             return html.Div([
                 html.H4("Report Generated"),
                 html.Pre(json.dumps(report, indent=2))
             ])
 
-    async def create_apqp_project(self, product_id: str, title: str, customer: str, target_date: str):
+        @app.callback(
+            Output("spc-simulation-output", "children"),
+            Input("run-spc-sim-btn", "n_clicks")
+        )
+        def run_spc_simulation(n_clicks):
+            """Run SPC simulation and display charts"""
+            if n_clicks == 0:
+                return html.Div("Натиснете бутона, за да стартирате симулацията.")
+
+            # Generate sample data for simulation
+            np.random.seed(int(datetime.now().timestamp()))
+            data = pd.DataFrame({
+                'measurement': np.concatenate([
+                    np.random.normal(loc=10.0, scale=0.1, size=100),
+                    np.random.normal(loc=10.15, scale=0.12, size=50)  # Simulate a process shift
+                ])
+            })
+
+            spc = StatisticalProcessControl(data, 'measurement', subgroup_size=5)
+            spc.calculate_control_limits()
+            analysis_df = spc.analyze()
+
+            x_bar_chart = dcc.Graph(figure=spc.plot_x_bar_chart())
+            r_chart = dcc.Graph(figure=spc.plot_r_chart())
+
+            results_table = dash_table.DataTable(
+                columns=[{"name": i, "id": i} for i in analysis_df.columns],
+                data=analysis_df.to_dict('records'),
+                style_table={'overflowX': 'auto'},
+                style_cell={'textAlign': 'left'},
+                style_header={
+                    'backgroundColor': 'rgb(230, 230, 230)',
+                    'fontWeight': 'bold'
+                }
+            )
+
+            return html.Div([
+                dbc.Row([
+                    dbc.Col(x_bar_chart, width=6),
+                    dbc.Col(r_chart, width=6)
+                ]),
+                dbc.Row([
+                    dbc.Col([
+                        html.H4("Резултати от анализа", className="mt-4"),
+                        results_table
+                    ], width=12)
+                ])
+            ])
+
+    def create_apqp_project(self, product_id: str, title: str, customer: str, target_date: str):
         """Create new APQP project"""
         project_config = {
             "product_id": product_id,
@@ -553,18 +579,18 @@ class AutomotiveQualityGUI:
             "customer": customer,
             "target_completion": target_date
         }
-        await automotive_quality.create_apqp_project(f"apqp_{int(datetime.now().timestamp())}", project_config)
+        automotive_quality.create_apqp_project(f"apqp_{int(datetime.now().timestamp())}", project_config)
 
-    async def submit_ppap(self, product_id: str, level: str, supplier_id: str):
+    def submit_ppap(self, product_id: str, level: str, supplier_id: str):
         """Submit PPAP documentation"""
         submission_config = {
             "product_id": product_id,
             "submission_level": level,
             "supplier_id": supplier_id
         }
-        await automotive_quality.submit_ppap(f"ppap_{int(datetime.now().timestamp())}", submission_config)
+        automotive_quality.submit_ppap(f"ppap_{int(datetime.now().timestamp())}", submission_config)
 
-    async def report_non_conformance(self, description: str, severity: str, product_id: str, quantity: int):
+    def report_non_conformance(self, description: str, severity: str, product_id: str, quantity: int):
         """Report non-conformance"""
         nc_config = {
             "description": description,
@@ -572,7 +598,7 @@ class AutomotiveQualityGUI:
             "product_id": product_id,
             "quantity_affected": quantity
         }
-        await automotive_quality.report_non_conformance(nc_config)
+        automotive_quality.report_non_conformance(nc_config)
 
     def get_apqp_projects_list(self) -> html.Div:
         """Get list of APQP projects"""
