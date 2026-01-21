@@ -16,222 +16,132 @@ Features:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timedelta
-import json
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
+from typing import Dict, List, Any
+from datetime import datetime
+import matplotlib.pyplot as plt
 import warnings
+
+from utils.logging_config import get_logger
+
 warnings.filterwarnings('ignore')
+logger = get_logger(__name__)
 
 class CarbonFootprintTracker:
     """
-    Tracks and calculates carbon footprint for industrial operations.
+    Tracks and calculates carbon footprint for industrial operations, categorized by Scope 1, 2, and 3.
     """
 
     def __init__(self):
+        # Emission factors (kg CO2e per unit)
         self.emission_factors = {
-            'electricity': 0.4,  # kg CO2 per kWh (varies by region)
-            'natural_gas': 2.0,  # kg CO2 per cubic meter
-            'diesel': 2.7,       # kg CO2 per liter
-            'petrol': 2.3,       # kg CO2 per liter
-            'coal': 2.4,         # kg CO2 per kg
-            'manufacturing_process': 1.5,  # kg CO2 per unit produced
-            'transport': 0.1     # kg CO2 per km
+            # Scope 1: Direct emissions
+            'natural_gas_m3': {'factor': 2.0, 'scope': 1},
+            'diesel_liter': {'factor': 2.7, 'scope': 1},
+            'petrol_liter': {'factor': 2.3, 'scope': 1},
+            'company_vehicles_km': {'factor': 0.18, 'scope': 1}, # Avg for cars
+
+            # Scope 2: Indirect emissions from purchased energy
+            'electricity_kwh': {'factor': 0.4, 'scope': 2},
+
+            # Scope 3: Other indirect emissions
+            'purchased_goods_value': {'factor': 0.5, 'scope': 3}, # kg CO2e per EUR/USD
+            'waste_disposal_ton': {'factor': 500, 'scope': 3}, # Methane emissions
+            'business_travel_km': {'factor': 0.15, 'scope': 3}, # Air travel
+            'employee_commuting_km': {'factor': 0.12, 'scope': 3},
         }
 
-        self.carbon_data = []
+        self.activities = []
         self.baseline_emissions = {}
 
-    def calculate_carbon_footprint(self, operations_data: Dict[str, Any]) -> Dict[str, Any]:
+    def log_activity(self, activity_type: str, value: float, unit: str, date: datetime = None):
+        """Logs a single business activity that produces emissions."""
+        if date is None:
+            date = datetime.utcnow()
+
+        self.activities.append({
+            "date": date,
+            "activity": activity_type,
+            "value": value,
+            "unit": unit
+        })
+
+    def calculate_footprint(self) -> Dict[str, Any]:
         """
-        Calculate carbon footprint for given operations.
-
-        Args:
-            operations_data: Data about industrial operations
-
-        Returns:
-            Dict[str, Any]: Carbon footprint analysis
+        Calculates the total carbon footprint from all logged activities,
+        broken down by scope.
         """
-        total_emissions = 0
-        breakdown = {}
+        if not self.activities:
+            return {"total_emissions": 0, "by_scope": {}, "by_activity": {}}
 
-        # Energy consumption emissions
-        energy_emissions = self._calculate_energy_emissions(operations_data.get('energy_consumption', {}))
-        total_emissions += energy_emissions
-        breakdown['energy'] = energy_emissions
-
-        # Manufacturing process emissions
-        process_emissions = self._calculate_process_emissions(operations_data.get('production_data', {}))
-        total_emissions += process_emissions
-        breakdown['manufacturing'] = process_emissions
-
-        # Transportation emissions
-        transport_emissions = self._calculate_transport_emissions(operations_data.get('transport_data', {}))
-        total_emissions += transport_emissions
-        breakdown['transport'] = transport_emissions
-
-        # Waste emissions
-        waste_emissions = self._calculate_waste_emissions(operations_data.get('waste_data', {}))
-        total_emissions += waste_emissions
-        breakdown['waste'] = waste_emissions
-
-        # Calculate intensity metrics
-        production_volume = operations_data.get('production_volume', 1)
-        carbon_intensity = total_emissions / production_volume if production_volume > 0 else 0
-
-        # Store data point
-        data_point = {
-            'timestamp': datetime.utcnow(),
-            'total_emissions': total_emissions,
-            'breakdown': breakdown,
-            'carbon_intensity': carbon_intensity,
-            'operations_data': operations_data
-        }
-        self.carbon_data.append(data_point)
-
-        # Calculate trends
-        trends = self._calculate_emission_trends()
-
-        return {
-            'total_carbon_footprint': round(total_emissions, 2),
-            'carbon_intensity': round(carbon_intensity, 4),
-            'emissions_breakdown': {k: round(v, 2) for k, v in breakdown.items()},
-            'trends': trends,
-            'recommendations': self._generate_sustainability_recommendations(breakdown, trends),
-            'comparison_to_baseline': self._compare_to_baseline(total_emissions)
+        report = {
+            "total_emissions": 0.0,
+            "by_scope": {1: 0.0, 2: 0.0, 3: 0.0},
+            "by_activity": {}
         }
 
-    def _calculate_energy_emissions(self, energy_data: Dict[str, Any]) -> float:
+        for activity_log in self.activities:
+            key = f"{activity_log['activity']}_{activity_log['unit']}"
+            if key in self.emission_factors:
+                ef_data = self.emission_factors[key]
+                emissions = activity_log['value'] * ef_data['factor']
+
+                report['total_emissions'] += emissions
+                report['by_scope'][ef_data['scope']] += emissions
+
+                activity_name = activity_log['activity']
+                if activity_name not in report['by_activity']:
+                    report['by_activity'][activity_name] = 0.0
+                report['by_activity'][activity_name] += emissions
+
+        # Round the results for cleaner output
+        for activity, value in report['by_activity'].items():
+            report['by_activity'][activity] = round(value, 2)
+        for scope, value in report['by_scope'].items():
+            report['by_scope'][scope] = round(value, 2)
+        report['total_emissions'] = round(report['total_emissions'], 2)
+
+        return report
+
+    def generate_report(self) -> Dict[str, Any]:
         """
-        Calculate emissions from energy consumption.
+        Generates a comprehensive report including footprint, trends, and recommendations.
         """
-        emissions = 0
+        footprint_data = self.calculate_footprint()
 
-        # Electricity
-        electricity_kwh = energy_data.get('electricity_kwh', 0)
-        emissions += electricity_kwh * self.emission_factors['electricity']
+        recommendations = self._generate_recommendations(footprint_data)
+        baseline_comparison = self._compare_to_baseline(footprint_data.get('total_emissions', 0))
 
-        # Natural gas
-        gas_volume = energy_data.get('natural_gas_m3', 0)
-        emissions += gas_volume * self.emission_factors['natural_gas']
+        footprint_data['recommendations'] = recommendations
+        footprint_data['baseline_comparison'] = baseline_comparison
 
-        # Other fuels
-        diesel_liters = energy_data.get('diesel_liters', 0)
-        emissions += diesel_liters * self.emission_factors['diesel']
+        logger.info("Carbon footprint report generated successfully.")
+        return footprint_data
 
-        return emissions
-
-    def _calculate_process_emissions(self, production_data: Dict[str, Any]) -> float:
+    def _generate_recommendations(self, footprint: Dict[str, Any]) -> List[str]:
         """
-        Calculate emissions from manufacturing processes.
-        """
-        units_produced = production_data.get('units_produced', 0)
-        process_type = production_data.get('process_type', 'standard')
-
-        # Base emissions per unit
-        base_factor = self.emission_factors['manufacturing_process']
-
-        # Adjust for process type
-        if process_type == 'energy_intensive':
-            base_factor *= 2.0
-        elif process_type == 'efficient':
-            base_factor *= 0.7
-
-        return units_produced * base_factor
-
-    def _calculate_transport_emissions(self, transport_data: Dict[str, Any]) -> float:
-        """
-        Calculate emissions from transportation.
-        """
-        emissions = 0
-
-        shipments = transport_data.get('shipments', [])
-        for shipment in shipments:
-            distance = shipment.get('distance_km', 0)
-            vehicle_type = shipment.get('vehicle_type', 'truck')
-
-            # Adjust emission factor based on vehicle type
-            if vehicle_type == 'electric':
-                factor = 0.05  # Much lower for electric vehicles
-            elif vehicle_type == 'hybrid':
-                factor = 0.08
-            else:
-                factor = self.emission_factors['transport']
-
-            emissions += distance * factor
-
-        return emissions
-
-    def _calculate_waste_emissions(self, waste_data: Dict[str, Any]) -> float:
-        """
-        Calculate emissions from waste generation.
-        """
-        emissions = 0
-
-        # Landfill emissions (methane)
-        landfill_waste = waste_data.get('landfill_tons', 0)
-        emissions += landfill_waste * 0.5  # kg CO2 equivalent per ton
-
-        # Incineration emissions
-        incinerated_waste = waste_data.get('incinerated_tons', 0)
-        emissions += incinerated_waste * 0.3
-
-        return emissions
-
-    def _calculate_emission_trends(self) -> Dict[str, Any]:
-        """
-        Calculate emission trends over time.
-        """
-        if len(self.carbon_data) < 2:
-            return {"trend": "insufficient_data"}
-
-        recent_data = self.carbon_data[-10:]  # Last 10 data points
-        emissions = [d['total_emissions'] for d in recent_data]
-
-        if len(emissions) >= 2:
-            # Calculate trend (simplified)
-            trend = (emissions[-1] - emissions[0]) / len(emissions)
-            trend_direction = "increasing" if trend > 0 else "decreasing" if trend < 0 else "stable"
-
-            return {
-                "trend_direction": trend_direction,
-                "trend_magnitude": abs(trend),
-                "recent_average": np.mean(emissions),
-                "volatility": np.std(emissions)
-            }
-
-        return {"trend": "calculating"}
-
-    def _generate_sustainability_recommendations(self, breakdown: Dict[str, float],
-                                               trends: Dict[str, Any]) -> List[str]:
-        """
-        Generate sustainability recommendations.
+        Generate sustainability recommendations based on the footprint breakdown.
         """
         recommendations = []
+        total = footprint.get('total_emissions', 0)
+        if total == 0:
+            return ["Log activities to generate recommendations."]
 
-        # Energy recommendations
-        if breakdown.get('energy', 0) > 0.4 * sum(breakdown.values()):
-            recommendations.append("Implement energy efficiency measures and renewable energy sources")
+        by_scope = footprint.get('by_scope', {})
 
-        # Process recommendations
-        if breakdown.get('manufacturing', 0) > 0.3 * sum(breakdown.values()):
-            recommendations.append("Optimize manufacturing processes and adopt cleaner technologies")
+        # Scope 1 Recommendations
+        if by_scope.get(1, 0) / total > 0.3:
+            recommendations.append("Focus on reducing direct emissions: upgrade fleet to EVs, improve on-site fuel efficiency.")
 
-        # Transport recommendations
-        if breakdown.get('transport', 0) > 0.2 * sum(breakdown.values()):
-            recommendations.append("Switch to electric vehicles and optimize logistics routes")
+        # Scope 2 Recommendations
+        if by_scope.get(2, 0) / total > 0.4:
+            recommendations.append("Address energy consumption: switch to a renewable electricity provider or install on-site generation (solar).")
 
-        # Trend-based recommendations
-        if trends.get('trend_direction') == 'increasing':
-            recommendations.append("Implement immediate emission reduction measures")
+        # Scope 3 Recommendations
+        if by_scope.get(3, 0) / total > 0.3:
+            recommendations.append("Engage with supply chain to reduce Scope 3 emissions: prioritize sustainable suppliers and promote employee commuting alternatives.")
 
-        # General recommendations
-        recommendations.extend([
-            "Conduct regular carbon audits",
-            "Set science-based targets for emission reduction",
-            "Invest in carbon offset projects"
-        ])
+        if not recommendations:
+            recommendations.append("Emissions are well-balanced. Focus on continuous improvement across all scopes.")
 
         return recommendations
 
@@ -258,450 +168,74 @@ class CarbonFootprintTracker:
             "status": "improving" if percent_change < 0 else "worsening"
         }
 
-class GreenAIOptimizer:
-    """
-    Optimizes AI models for energy efficiency and reduced carbon footprint.
-    """
-
-    def __init__(self):
-        self.model_energy_profiles = {}
-        self.optimization_techniques = {
-            'quantization': self._apply_quantization,
-            'pruning': self._apply_pruning,
-            'knowledge_distillation': self._apply_distillation,
-            'efficient_architecture': self._use_efficient_architecture
-        }
-
-    def optimize_model_for_efficiency(self, model_info: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Optimize AI model for energy efficiency.
-
-        Args:
-            model_info: Information about the AI model
-
-        Returns:
-            Dict[str, Any]: Optimization results
-        """
-        model_type = model_info.get('type', 'neural_network')
-        current_energy = model_info.get('energy_consumption', 100)  # kWh per inference
-        accuracy = model_info.get('accuracy', 0.85)
-
-        # Apply optimization techniques
-        optimizations = []
-        total_energy_savings = 0
-        total_accuracy_loss = 0
-
-        for technique_name, technique_func in self.optimization_techniques.items():
-            result = technique_func(model_info)
-            if result['applicable']:
-                optimizations.append(result)
-                total_energy_savings += result['energy_savings']
-                total_accuracy_loss += result['accuracy_loss']
-
-        # Calculate optimized metrics
-        optimized_energy = current_energy * (1 - total_energy_savings)
-        optimized_accuracy = accuracy * (1 - total_accuracy_loss)
-
-        carbon_savings = self._calculate_carbon_savings(total_energy_savings, model_info)
-
-        return {
-            'original_energy': current_energy,
-            'optimized_energy': round(optimized_energy, 2),
-            'energy_savings_percent': round(total_energy_savings * 100, 1),
-            'original_accuracy': accuracy,
-            'optimized_accuracy': round(optimized_accuracy, 3),
-            'accuracy_loss_percent': round(total_accuracy_loss * 100, 1),
-            'carbon_savings_kg': round(carbon_savings, 2),
-            'applied_optimizations': optimizations,
-            'recommendations': self._generate_optimization_recommendations(optimizations)
-        }
-
-    def _apply_quantization(self, model_info: Dict) -> Dict[str, Any]:
-        """
-        Apply quantization optimization.
-        """
-        model_size = model_info.get('model_size_mb', 100)
-
-        if model_size > 50:  # Applicable for larger models
-            return {
-                'technique': 'quantization',
-                'applicable': True,
-                'energy_savings': 0.3,  # 30% energy reduction
-                'accuracy_loss': 0.02,  # 2% accuracy loss
-                'description': 'Reduce model precision from 32-bit to 8-bit'
-            }
-
-        return {
-            'technique': 'quantization',
-            'applicable': False,
-            'reason': 'Model too small for significant quantization benefits'
-        }
-
-    def _apply_pruning(self, model_info: Dict) -> Dict[str, Any]:
-        """
-        Apply pruning optimization.
-        """
-        return {
-            'technique': 'pruning',
-            'applicable': True,
-            'energy_savings': 0.2,  # 20% energy reduction
-            'accuracy_loss': 0.01,  # 1% accuracy loss
-            'description': 'Remove redundant model parameters'
-        }
-
-    def _apply_distillation(self, model_info: Dict) -> Dict[str, Any]:
-        """
-        Apply knowledge distillation.
-        """
-        has_teacher_model = model_info.get('has_teacher_model', False)
-
-        if has_teacher_model:
-            return {
-                'technique': 'knowledge_distillation',
-                'applicable': True,
-                'energy_savings': 0.25,  # 25% energy reduction
-                'accuracy_loss': 0.005,  # 0.5% accuracy loss
-                'description': 'Train smaller model to mimic larger teacher model'
-            }
-
-        return {
-            'technique': 'knowledge_distillation',
-            'applicable': False,
-            'reason': 'No teacher model available'
-        }
-
-    def _use_efficient_architecture(self, model_info: Dict) -> Dict[str, Any]:
-        """
-        Use efficient neural architecture.
-        """
-        return {
-            'technique': 'efficient_architecture',
-            'applicable': True,
-            'energy_savings': 0.15,  # 15% energy reduction
-            'accuracy_loss': 0.03,  # 3% accuracy loss
-            'description': 'Use MobileNet or EfficientNet architecture'
-        }
-
-    def _calculate_carbon_savings(self, energy_savings: float, model_info: Dict) -> float:
-        """
-        Calculate carbon savings from energy optimization.
-        """
-        annual_inferences = model_info.get('annual_inferences', 1000000)
-        carbon_factor = 0.4  # kg CO2 per kWh
-
-        energy_saved_kwh = model_info.get('energy_consumption', 100) * energy_savings * annual_inferences / 1000
-        carbon_savings = energy_saved_kwh * carbon_factor
-
-        return carbon_savings
-
-    def _generate_optimization_recommendations(self, optimizations: List[Dict]) -> List[str]:
-        """
-        Generate recommendations based on applied optimizations.
-        """
-        recommendations = []
-
-        applied_techniques = [opt['technique'] for opt in optimizations if opt['applicable']]
-
-        if 'quantization' in applied_techniques:
-            recommendations.append("Monitor model accuracy after quantization deployment")
-
-        if 'pruning' in applied_techniques:
-            recommendations.append("Implement gradual pruning to minimize accuracy impact")
-
-        if len(applied_techniques) > 2:
-            recommendations.append("Consider A/B testing to validate optimization benefits")
-
-        recommendations.append("Regularly re-evaluate and re-optimize models as data evolves")
-
-        return recommendations
-
-class CircularEconomyAnalyzer:
-    """
-    Analyzes and optimizes circular economy practices.
-    """
-
-    def __init__(self):
-        self.circularity_metrics = {
-            'material_recycling_rate': 0,
-            'product_lifespan_extension': 0,
-            'sharing_economy_utilization': 0,
-            'remufacturing_rate': 0
-        }
-
-    def analyze_circularity(self, operations_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Analyze circular economy performance.
-
-        Args:
-            operations_data: Data about operations and resource usage
-
-        Returns:
-            Dict[str, Any]: Circularity analysis
-        """
-        # Calculate circularity metrics
-        metrics = {}
-
-        # Material recycling rate
-        total_materials = operations_data.get('total_materials_used', 100)
-        recycled_materials = operations_data.get('recycled_materials', 20)
-        metrics['material_recycling_rate'] = recycled_materials / total_materials if total_materials > 0 else 0
-
-        # Product lifespan extension
-        original_lifespan = operations_data.get('original_product_lifespan_years', 5)
-        extended_lifespan = operations_data.get('extended_product_lifespan_years', 7)
-        metrics['product_lifespan_extension'] = (extended_lifespan - original_lifespan) / original_lifespan if original_lifespan > 0 else 0
-
-        # Sharing economy utilization
-        total_products = operations_data.get('total_products', 1000)
-        shared_products = operations_data.get('shared_products', 100)
-        metrics['sharing_economy_utilization'] = shared_products / total_products if total_products > 0 else 0
-
-        # Remanufacturing rate
-        total_manufactured = operations_data.get('total_manufactured', 1000)
-        remanufactured = operations_data.get('remanufactured', 200)
-        metrics['remanufacturing_rate'] = remanufactured / total_manufactured if total_manufactured > 0 else 0
-
-        # Overall circularity score
-        weights = {
-            'material_recycling_rate': 0.3,
-            'product_lifespan_extension': 0.2,
-            'sharing_economy_utilization': 0.25,
-            'remanufacturing_rate': 0.25
-        }
-
-        circularity_score = sum(metrics[metric] * weight for metric, weight in weights.items())
-
-        # Generate recommendations
-        recommendations = self._generate_circularity_recommendations(metrics)
-
-        return {
-            'circularity_score': round(circularity_score, 3),
-            'metrics': {k: round(v, 3) for k, v in metrics.items()},
-            'score_interpretation': self._interpret_circularity_score(circularity_score),
-            'recommendations': recommendations,
-            'improvement_potential': self._calculate_improvement_potential(metrics)
-        }
-
-    def _generate_circularity_recommendations(self, metrics: Dict[str, float]) -> List[str]:
-        """
-        Generate recommendations for improving circularity.
-        """
-        recommendations = []
-
-        if metrics['material_recycling_rate'] < 0.3:
-            recommendations.append("Increase material recycling programs and supplier partnerships")
-
-        if metrics['product_lifespan_extension'] < 0.2:
-            recommendations.append("Implement product upgrade and maintenance services")
-
-        if metrics['sharing_economy_utilization'] < 0.15:
-            recommendations.append("Develop product sharing and rental programs")
-
-        if metrics['remanufacturing_rate'] < 0.2:
-            recommendations.append("Invest in remanufacturing capabilities and reverse logistics")
-
-        recommendations.extend([
-            "Conduct lifecycle assessment for all products",
-            "Partner with recycling facilities and waste management companies",
-            "Design products for disassembly and material recovery"
-        ])
-
-        return recommendations
-
-    def _interpret_circularity_score(self, score: float) -> str:
-        """
-        Interpret circularity score.
-        """
-        if score >= 0.8:
-            return "Excellent circularity - leading sustainable practices"
-        elif score >= 0.6:
-            return "Good circularity - strong sustainable foundation"
-        elif score >= 0.4:
-            return "Moderate circularity - room for improvement"
-        elif score >= 0.2:
-            return "Low circularity - significant improvement needed"
-        else:
-            return "Poor circularity - urgent action required"
-
-    def _calculate_improvement_potential(self, metrics: Dict[str, float]) -> Dict[str, float]:
-        """
-        Calculate potential for improvement.
-        """
-        potential = {}
-
-        for metric, value in metrics.items():
-            # Assume maximum possible value is 1.0
-            potential[metric] = 1.0 - value
-
-        return {k: round(v, 3) for k, v in potential.items()}
-
-class SustainabilityManager:
-    """
-    Comprehensive sustainability management system.
-    """
-
-    def __init__(self):
-        self.carbon_tracker = CarbonFootprintTracker()
-        self.green_ai_optimizer = GreenAIOptimizer()
-        self.circular_economy_analyzer = CircularEconomyAnalyzer()
-
-    def comprehensive_sustainability_analysis(self, operations_data: Dict[str, Any],
-                                           ai_models_data: List[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Perform comprehensive sustainability analysis.
-
-        Args:
-            operations_data: Industrial operations data
-            ai_models_data: Data about AI models in use
-
-        Returns:
-            Dict[str, Any]: Comprehensive sustainability report
-        """
-        # Carbon footprint analysis
-        carbon_analysis = self.carbon_tracker.calculate_carbon_footprint(operations_data)
-
-        # Circular economy analysis
-        circularity_analysis = self.circular_economy_analyzer.analyze_circularity(operations_data)
-
-        # Green AI analysis
-        ai_sustainability = []
-        if ai_models_data:
-            for model_data in ai_models_data:
-                ai_analysis = self.green_ai_optimizer.optimize_model_for_efficiency(model_data)
-                ai_sustainability.append(ai_analysis)
-
-        # Overall sustainability score
-        carbon_score = max(0, 1 - (carbon_analysis['carbon_intensity'] / 10))  # Normalize
-        circularity_score = circularity_analysis['circularity_score']
-        ai_score = np.mean([ai['energy_savings_percent'] / 100 for ai in ai_sustainability]) if ai_sustainability else 0.5
-
-        overall_sustainability = (carbon_score * 0.4 + circularity_score * 0.4 + ai_score * 0.2)
-
-        # Generate integrated recommendations
-        integrated_recommendations = self._generate_integrated_recommendations(
-            carbon_analysis, circularity_analysis, ai_sustainability
-        )
-
-        return {
-            'carbon_footprint_analysis': carbon_analysis,
-            'circularity_analysis': circularity_analysis,
-            'ai_sustainability_analysis': ai_sustainability,
-            'overall_sustainability_score': round(overall_sustainability, 3),
-            'sustainability_rating': self._rate_sustainability(overall_sustainability),
-            'integrated_recommendations': integrated_recommendations,
-            'key_metrics': {
-                'total_carbon_emissions': carbon_analysis['total_carbon_footprint'],
-                'circularity_score': circularity_analysis['circularity_score'],
-                'ai_energy_savings': sum(ai.get('energy_savings_percent', 0) for ai in ai_sustainability)
-            }
-        }
-
-    def _rate_sustainability(self, score: float) -> str:
-        """
-        Rate overall sustainability.
-        """
-        if score >= 0.8:
-            return "Platinum - Industry leader in sustainability"
-        elif score >= 0.6:
-            return "Gold - Strong sustainability performance"
-        elif score >= 0.4:
-            return "Silver - Good sustainability practices"
-        elif score >= 0.2:
-            return "Bronze - Developing sustainability approach"
-        else:
-            return "Basic - Significant improvement needed"
-
-    def _generate_integrated_recommendations(self, carbon: Dict, circularity: Dict,
-                                           ai_sustainability: List[Dict]) -> List[str]:
-        """
-        Generate integrated sustainability recommendations.
-        """
-        recommendations = []
-
-        # Carbon-focused recommendations
-        if carbon['carbon_intensity'] > 5:
-            recommendations.append("Priority: Implement immediate carbon reduction measures")
-
-        # Circularity-focused recommendations
-        if circularity['circularity_score'] < 0.4:
-            recommendations.append("Develop comprehensive circular economy strategy")
-
-        # AI-focused recommendations
-        if ai_sustainability:
-            avg_savings = np.mean([ai['energy_savings_percent'] for ai in ai_sustainability])
-            if avg_savings < 20:
-                recommendations.append("Optimize AI models for energy efficiency")
-
-        # Integrated recommendations
-        recommendations.extend([
-            "Establish sustainability KPIs and regular reporting",
-            "Invest in renewable energy and carbon offset programs",
-            "Partner with sustainability-focused suppliers and customers",
-            "Implement employee training on sustainable practices"
-        ])
-
-        return recommendations
-
-# Example usage
 if __name__ == "__main__":
-    sustainability_manager = SustainabilityManager()
 
-    # Sample operations data
-    operations_data = {
-        'energy_consumption': {
-            'electricity_kwh': 10000,
-            'natural_gas_m3': 500,
-            'diesel_liters': 200
-        },
-        'production_data': {
-            'units_produced': 1000,
-            'process_type': 'standard'
-        },
-        'transport_data': {
-            'shipments': [
-                {'distance_km': 500, 'vehicle_type': 'truck'},
-                {'distance_km': 200, 'vehicle_type': 'electric'}
-            ]
-        },
-        'waste_data': {
-            'landfill_tons': 10,
-            'incinerated_tons': 5
-        },
-        'production_volume': 1000,
-        'total_materials_used': 1000,
-        'recycled_materials': 300,
-        'original_product_lifespan_years': 5,
-        'extended_product_lifespan_years': 8,
-        'total_products': 1000,
-        'shared_products': 150,
-        'total_manufactured': 1000,
-        'remanufactured': 250
-    }
+    def plot_scope_distribution(report: Dict[str, Any], filename="carbon_footprint_scopes.png"):
+        """Generates a pie chart for the emissions distribution by scope."""
+        labels = [f"Scope {s}" for s in report['by_scope'].keys()]
+        sizes = report['by_scope'].values()
 
-    # Sample AI models data
-    ai_models_data = [
-        {
-            'type': 'neural_network',
-            'energy_consumption': 150,  # kWh per inference
-            'accuracy': 0.92,
-            'model_size_mb': 200,
-            'annual_inferences': 500000,
-            'has_teacher_model': True
-        }
-    ]
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90, colors=['#ff9999','#66b3ff','#99ff99'])
+        ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
 
-    # Comprehensive sustainability analysis
-    analysis = sustainability_manager.comprehensive_sustainability_analysis(
-        operations_data, ai_models_data
-    )
+        plt.title(f"Разпределение на емисиите по категории\nОбщо: {report['total_emissions']} kg CO2e", pad=20)
+        plt.savefig(filename)
+        logger.info(f"Графиката с разпределението по категории е запазена в {filename}")
 
-    print("Comprehensive Sustainability Analysis:")
-    print(f"Overall Sustainability Score: {analysis['overall_sustainability_score']}")
-    print(f"Sustainability Rating: {analysis['sustainability_rating']}")
-    print(f"Total Carbon Emissions: {analysis['key_metrics']['total_carbon_emissions']} kg CO2")
-    print(f"Circularity Score: {analysis['key_metrics']['circularity_score']}")
-    print(f"AI Energy Savings: {analysis['key_metrics']['ai_energy_savings']:.1f}%")
+    # --- Демонстрация на проследяване на въглероден отпечатък ---
+    print("\n" + "="*50)
+    print("ДЕМОНСТРАЦИЯ НА ПРОСЛЕДЯВАНЕ НА ВЪГЛЕРОДЕН ОТПЕЧАТЪК")
+    print("="*50 + "\n")
 
-    print(f"\nTop Recommendations:")
-    for i, rec in enumerate(analysis['integrated_recommendations'][:5], 1):
-        print(f"{i}. {rec}")
+    # 1. Инициализация на тракера
+    tracker = CarbonFootprintTracker()
+    logger.info("Системата за проследяване е инициализирана.")
+
+    # 2. Симулация и регистриране на дейности за един месец
+    print("Регистриране на симулирани бизнес дейности...")
+    tracker.log_activity("electricity", 15000, "kwh") # Scope 2
+    tracker.log_activity("natural_gas", 2000, "m3") # Scope 1
+    tracker.log_activity("company_vehicles", 5000, "km") # Scope 1
+    tracker.log_activity("purchased_goods", 25000, "value") # Scope 3
+    tracker.log_activity("waste_disposal", 15, "ton") # Scope 3
+    tracker.log_activity("business_travel", 12000, "km") # Scope 3
+    tracker.log_activity("employee_commuting", 40000, "km") # Scope 3
+    logger.info(f"Регистрирани са {len(tracker.activities)} дейности.")
+    print("-" * 50 + "\n")
+
+    # 3. Генериране на подробен доклад
+    print("Генериране на доклад за въглеродния отпечатък...")
+    final_report = tracker.generate_report()
+
+    print(f"\nОБЩ ВЪГЛЕРОДЕН ОТПЕЧАТЪК: {final_report['total_emissions']} kg CO2e\n")
+
+    print("Разбивка по категории (Scopes):")
+    for scope, emissions in final_report['by_scope'].items():
+        percentage = (emissions / final_report['total_emissions']) * 100 if final_report['total_emissions'] > 0 else 0
+        print(f"  - Scope {scope}: {emissions} kg CO2e ({percentage:.1f}%)")
+
+    print("\nРазбивка по дейности:")
+    for activity, emissions in final_report['by_activity'].items():
+        print(f"  - {activity.replace('_', ' ').capitalize()}: {emissions} kg CO2e")
+
+    print("\nСравнение с базова линия:")
+    baseline_info = final_report['baseline_comparison']
+    if baseline_info['status'] == 'baseline_set':
+        print("  - Базовата линия е зададена сега. При следващо изчисление ще има сравнение.")
+    else:
+        print(f"  - Статус: {baseline_info['status']} ({baseline_info['percent_change']:.1f}%)")
+
+    print("\nПрепоръки за намаляване на емисиите:")
+    for rec in final_report['recommendations']:
+        print(f"  - {rec}")
+
+    print("\n" + "-" * 50)
+
+    # 4. Генериране на визуализация
+    if final_report['total_emissions'] > 0:
+        plot_scope_distribution(final_report)
+
+    print("\n" + "="*50)
+    print("ДЕМОНСТРАЦИЯТА ПРИКЛЮЧИ")
+    print("="*50 + "\n")
