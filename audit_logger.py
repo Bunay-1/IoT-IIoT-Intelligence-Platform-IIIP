@@ -133,33 +133,47 @@ class AuditLogger:
         }
 
     def _load_events_from_file(self):
-        """Load audit events from the log file."""
+        """Load audit events from the log file (JSON Lines format)."""
         log_file = self.config["log_file"]
         if os.path.exists(log_file):
             try:
                 with open(log_file, 'r') as f:
-                    raw_events = json.load(f)
-                for event_data in raw_events:
-                    # Reconstruct the AuditEvent object
-                    event_data['event_type'] = AuditEventType(event_data['event_type'])
-                    event_data['security_level'] = SecurityLevel(event_data['security_level'])
-                    event_data['timestamp'] = datetime.fromisoformat(event_data['timestamp'])
-                    event_data['compliance_tags'] = [ComplianceStandard(tag) for tag in event_data['compliance_tags']]
-                    self.audit_events.append(AuditEvent(**event_data))
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        event_data = json.loads(line)
+                        # Reconstruct the AuditEvent object
+                        event_data['event_type'] = AuditEventType(event_data['event_type'])
+                        event_data['security_level'] = SecurityLevel(event_data['security_level'])
+                        event_data['timestamp'] = datetime.fromisoformat(event_data['timestamp'])
+                        event_data['compliance_tags'] = [ComplianceStandard(tag) for tag in event_data['compliance_tags']]
+                        self.audit_events.append(AuditEvent(**event_data))
                 logger.info(f"Loaded {len(self.audit_events)} events from {log_file}")
             except (json.JSONDecodeError, TypeError, KeyError) as e:
                 logger.error(f"Failed to load or parse audit log file {log_file}: {e}")
 
-    def _save_events_to_file(self):
-        """Save all audit events to the log file."""
+    def _append_event_to_file(self, event: AuditEvent):
+        """Append a single audit event to the log file (JSON Lines format)."""
+        log_file = self.config["log_file"]
+        try:
+            event_dict = asdict(event)
+            with open(log_file, 'a') as f:
+                json.dump(event_dict, f, default=json_serializer)
+                f.write('\n')
+        except (IOError, TypeError) as e:
+            logger.error(f"Failed to append audit event to {log_file}: {e}")
+
+    def _rewrite_log_file(self):
+        """Save all in-memory audit events to the log file, overwriting it."""
         log_file = self.config["log_file"]
         try:
             with open(log_file, 'w') as f:
-                # Convert list of dataclasses to list of dicts for JSON serialization
-                events_to_save = [asdict(event) for event in self.audit_events]
-                json.dump(events_to_save, f, indent=4, default=json_serializer)
+                for event in self.audit_events:
+                    event_dict = asdict(event)
+                    json.dump(event_dict, f, default=json_serializer)
+                    f.write('\n')
         except (IOError, TypeError) as e:
-            logger.error(f"Failed to save audit events to {log_file}: {e}")
+            logger.error(f"Failed to rewrite audit log file {log_file}: {e}")
 
     async def log_audit_event(
         self,
@@ -196,7 +210,7 @@ class AuditLogger:
             )
             event.checksum = self._calculate_checksum(event)
             self.audit_events.append(event)
-            self._save_events_to_file()  # Persist after every event
+            self._append_event_to_file(event) # Persist after every event
 
             if await self._is_security_violation(event):
                 await self._handle_security_violation(event)
@@ -357,12 +371,13 @@ class AuditLogger:
 
             try:
                 with open(archive_file, 'w') as f:
-                    events_to_save = [asdict(event) for event in events_to_archive]
-                    json.dump(events_to_save, f, indent=4, default=json_serializer)
+                    for event in events_to_archive:
+                        json.dump(asdict(event), f, default=json_serializer)
+                        f.write('\n')
                 logger.info(f"Archived {len(events_to_archive)} audit events to {archive_file}")
 
                 # Update the main log file after archiving
-                self._save_events_to_file()
+                self._rewrite_log_file()
             except (IOError, TypeError) as e:
                 logger.error(f"Failed to archive audit events to {archive_file}: {e}")
                 # If archiving fails, add the events back to the main list to prevent data loss
@@ -882,13 +897,18 @@ async def run_simulation():
 
     # Tamper with the log file directly
     try:
-        with open(log_file, 'r+') as f:
-            events = json.load(f)
-            if events:
-                events[0]['details']['tampered'] = True # Change a detail
-                f.seek(0)
-                f.truncate()
-                json.dump(events, f, indent=4, default=json_serializer)
+        lines = []
+        with open(log_file, 'r') as f:
+            lines = f.readlines()
+
+        if lines:
+            # Tamper with the first line (first event)
+            first_event = json.loads(lines[0])
+            first_event['details']['tampered'] = True
+            lines[0] = json.dumps(first_event, default=json_serializer) + '\n'
+
+            with open(log_file, 'w') as f:
+                f.writelines(lines)
 
         # Re-load the logger to read the tampered file
         tampered_logger = AuditLogger()
