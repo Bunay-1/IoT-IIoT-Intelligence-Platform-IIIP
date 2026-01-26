@@ -16,3 +16,4 @@ audit_log.json
 automl_models_output/
 automotive_gui.log
 *.png
+gui_state.json
