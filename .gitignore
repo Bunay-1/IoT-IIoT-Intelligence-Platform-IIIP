@@ -18,3 +18,4 @@ automotive_gui.log
 *.png
 gui_state.json
 contractor_data.json
+incident_response_data.json
