@@ -2,14 +2,14 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.0.1-green.svg)](#)
 [![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://www.docker.com/)
 
 Интелигентна платформа за индустриален интернет на нещата (IIoT), изкуствен интелект (AI) и управление на жизнения цикъл на Industry 4.0/5.0 процеси.
 
 ---
 
-## 📅 Последна актуализация: 22.01.2025 | Версия: 1.0.0
+## 📅 Последна актуализация: 22.01.2025 | Версия: 1.0.1
 
 ## 🔭 Визия
 IIIP е цялостна екосистема, проектирана да обедини авангардни технологии в единна, мащабируема и високопроизводителна платформа. Тя обхваща всичко от сензорни данни в реално време и дигитални двойници до етичен изкуствен интелект, квантови симулации и блокчейн интеграция.
