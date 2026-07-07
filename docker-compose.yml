@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  iiip-platform:
+    build: .
+    image: iiip-platform:1.0.0
+    container_name: iiip_core
+    ports:
+      - "8000:8000"
+      - "8051:8051"
+    environment:
+      - ENV=production
+      - LOG_LEVEL=INFO
+    volumes:
+      - .:/app
+    restart: always
+
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:v2.11.3
+    container_name: mlflow_tracker
+    ports:
+      - "5000:5000"
+    command: mlflow server --host 0.0.0.0
