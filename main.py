@@ -16,16 +16,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from cnc_ai_pipeline import main as ai_pipeline_main
+from src.industry_4_0.cnc_ai_pipeline import main as ai_pipeline_main
 
 # Import services
-from fastapi_backend import app as fastapi_app
-from kafka_ai_integration import main as kafka_main
-from module_integration_service import ModuleIntegrationService
+from src.core.fastapi_backend import app as fastapi_app
+from src.infrastructure.kafka_ai_integration import main as kafka_main
+from src.core.module_integration_service import ModuleIntegrationService
 
 # Optional services (check if available)
 try:
-    from chatbot_service import ChatbotService
+    from src.ai_ml.chatbot_service import ChatbotService
 
     CHATBOT_AVAILABLE = True
 except ImportError:
@@ -33,7 +33,7 @@ except ImportError:
     logger.warning("Chatbot service not available")
 
 try:
-    from forecasting_service import ForecastingService
+    from src.ai_ml.forecasting_service import ForecastingService
 
     FORECASTING_AVAILABLE = True
 except ImportError:
@@ -41,7 +41,7 @@ except ImportError:
     logger.warning("Forecasting service not available")
 
 try:
-    from machine_performance_service import MachinePerformanceService
+    from src.industry_4_0.machine_performance_service import MachinePerformanceService
 
     PERFORMANCE_AVAILABLE = True
 except ImportError:
@@ -49,7 +49,7 @@ except ImportError:
     logger.warning("Machine performance service not available")
 
 try:
-    from energy_monitoring_dashboard import EnergyMonitoringDashboard
+    from src.gui.energy_monitoring_dashboard import EnergyMonitoringDashboard
 
     ENERGY_MONITORING_AVAILABLE = True
 except ImportError:
@@ -58,8 +58,8 @@ except ImportError:
 
 # Import improved modules
 try:
-    from adaptive_rate_limiter_qos_manager import AdaptiveRateLimiterQoSManager
-    from energy_optimization_ai import EnergyOptimizationAI
+    from src.infrastructure.adaptive_rate_limiter_qos_manager import AdaptiveRateLimiterQoSManager
+    from src.sustainability.energy_optimization_ai import EnergyOptimizationAI
 
     IMPROVED_MODULES_AVAILABLE = True
 except ImportError as e:
@@ -68,8 +68,8 @@ except ImportError as e:
 
 # Import energy trading modules
 try:
-    from src.energy_trading_gui import EnergyTradingGUI
-    from src.energy_trading_marketplace import EnergyTradingMarketplace
+    from src.gui.energy_trading_gui import EnergyTradingGUI
+    from src.industry_4_0.energy_trading_marketplace import EnergyTradingMarketplace
 
     ENERGY_TRADING_AVAILABLE = True
 except ImportError as e:
@@ -79,8 +79,8 @@ except ImportError as e:
 # Import AR/VR modules
 try:
     from src.ar_vr_maintenance_guide import ARVRMaintenanceGuide
-    from src.mixed_reality_dashboard import MixedRealityDashboard
-    from src.vr_training_simulator import VRTrainingSimulator
+    from src.gui.mixed_reality_dashboard import MixedRealityDashboard
+    from src.gui.vr_training_simulator import VRTrainingSimulator
 
     ARVR_AVAILABLE = True
 except ImportError as e:
@@ -109,7 +109,7 @@ class PlatformOrchestrator:
         import uvicorn
         from fastapi import FastAPI
 
-        from config import settings
+        from src.core.config import settings
 
         # Create server config
         config = uvicorn.Config(
@@ -151,7 +151,7 @@ class PlatformOrchestrator:
             # Forecasting service needs database connection
             import asyncpg
 
-            from config import settings
+            from src.core.config import settings
 
             db_conn = await asyncpg.connect(
                 user=settings.postgres_user,
