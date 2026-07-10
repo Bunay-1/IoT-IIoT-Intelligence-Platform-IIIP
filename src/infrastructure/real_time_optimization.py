@@ -2,11 +2,18 @@ class RealTimeOptimization:
     def __init__(self, model=None):
         self.model = model
 
-    def optimize(self, current_parameters):
+    def optimize(self, current_parameters=None, state=None, *args, **kwargs):
         """Optimize parameters in real-time"""
-        print(f"Optimizing parameters: {current_parameters}")
+        params = current_parameters or state or {}
+        if isinstance(params, str):
+            print(f"Optimizing for state: {params}")
+            return {"status": "optimized", "state": params}
+        print(f"Optimizing parameters: {params}")
         # Mock optimization logic
-        optimized = {k: v * 1.1 for k, v in current_parameters.items()}
+        if isinstance(params, dict):
+            optimized = {k: v * 1.1 for k, v in params.items()}
+        else:
+            optimized = params
         return optimized
 
     def test_module(self):

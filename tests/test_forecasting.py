@@ -81,6 +81,9 @@ def generate_synthetic_machine_data(machine_id: str, days: int = 30) -> list:
     return data_points
 
 
+import pytest
+
+@pytest.mark.asyncio
 async def test_forecasting_service():
     """Test the forecasting service with synthetic data."""
     print("Testing Forecasting Service...")

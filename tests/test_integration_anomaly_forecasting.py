@@ -73,6 +73,9 @@ def generate_test_sensor_data(machine_id: str, hours: int = 24) -> list:
     return data_points
 
 
+import pytest
+
+@pytest.mark.asyncio
 async def test_anomaly_forecasting_integration():
     """Test integrated anomaly detection and forecasting."""
 
