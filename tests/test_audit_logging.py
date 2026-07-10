@@ -8,9 +8,11 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import pytest
 from src.security.audit_logger import audit_logger, log_user_action, log_security_event, AuditEvent
 
 
+@pytest.mark.asyncio
 async def test_audit_logging():
     """Test audit logging functionality."""
 

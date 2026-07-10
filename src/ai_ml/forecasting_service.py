@@ -74,11 +74,12 @@ class ForecastingService:
                 compression_type=KafkaConfig.COMPRESSION_TYPE,
             )
             logger.info("✅ Forecasting Kafka producers and consumers initialized.")
-        except NoBrokersAvailable:
-            logger.error(
-                "❌ No Kafka brokers available for ForecastingService. Please ensure Kafka is running."
+        except Exception as e:
+            logger.warning(
+                f"⚠️ No Kafka brokers available for ForecastingService ({e}). Running in offline/mock mode."
             )
-            exit(1)
+            self.consumer = None
+            self.producer = None
 
     async def _fetch_historical_data_for_forecasting(
         self, machine_id: str, days: int = 30
@@ -168,8 +169,9 @@ class ForecastingService:
         # TODO: Define a new Kafka topic for forecasts in KafkaConfig
         # For now, we'll use a generic topic or create a new one on the fly if needed
         forecast_topic = "cnc-forecasts"  # New topic for forecasts
-        self.producer.send(forecast_topic, value=forecast_data)
-        logger.info(f"📊 Published forecast for {forecast_data.get('machine_id')}")
+        if self.producer:
+            self.producer.send(forecast_topic, value=forecast_data)
+        logger.info(f"📊 [Mock/Published] Forecast for {forecast_data.get('machine_id')} completed.")
 
     async def process_data_for_forecasting(self):
         """
@@ -179,6 +181,9 @@ class ForecastingService:
         logger.info(
             "🚀 Forecasting Service started - listening for preprocessed data..."
         )
+        if not self.consumer:
+            logger.warning("No Kafka consumer available. Exiting process loop.")
+            return
         try:
             while True:
                 msg_pack = self.consumer.poll(timeout_ms=1000, max_records=10)

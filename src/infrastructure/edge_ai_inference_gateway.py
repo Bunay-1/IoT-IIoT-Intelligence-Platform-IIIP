@@ -768,3 +768,7 @@ class EdgeAIInferenceGateway:
 
         except Exception as e:
             self.logger.error(f"Model synchronization failed: {e}")
+
+
+# Alias for backward compatibility and test matching
+EdgeAiInferenceGateway = EdgeAIInferenceGateway

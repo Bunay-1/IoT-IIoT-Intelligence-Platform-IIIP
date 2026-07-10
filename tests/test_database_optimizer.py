@@ -8,10 +8,12 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import pytest
 from src.infrastructure.database_optimizer import DatabaseOptimizer
 import asyncpg
 
 
+@pytest.mark.asyncio
 async def test_database_optimizer():
     """Test database optimizer functionality."""
 

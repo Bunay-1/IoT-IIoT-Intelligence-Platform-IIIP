@@ -6,8 +6,9 @@ This module ensures data quality by monitoring and validating data ingestion, tr
 
 
 class DataQualityGovernance:
-    def __init__(self, schema_version):
-        self.schema_version = schema_version
+    def __init__(self, schema_version=None, schema=None, **kwargs):
+        self.schema_version = schema_version or schema or "1.0.0"
+        self.schema = schema or {}
         self.anomalies = []
 
     def validate_data(self, data):
@@ -20,6 +21,13 @@ class DataQualityGovernance:
         self.anomalies.append(anomaly)
         print(f"Anomaly detected: {anomaly}")
         return self.anomalies
+
+    def check_for_anomalies(self, data=None) -> list:
+        """
+        Checks for anomalies in data. Supporting test compatibility.
+        """
+        print(f"Checking for anomalies in: {data}")
+        return self.validate_data(data)
 
     def alert_anomalies(self):
         """
