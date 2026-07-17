@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.3-green.svg)](#)
+[![Version](https://img.shields.io/badge/version-1.2.4-green.svg)](#)
 [![Docker](https://img.shields.io/badge/docker-supported-blue.svg)](https://www.docker.com/)
 [![GDPR Compliance](https://img.shields.io/badge/GDPR-compliant-blue.svg)](#)
 [![ISO 27001](https://img.shields.io/badge/ISO%2027001-certified-darkgreen.svg)](#)
@@ -12,7 +12,7 @@
 
 ---
 
-## 📅 Последна актуализация: Юли 2026 | Версия: 1.2.3 (Autonomous Factory & Cross-Site Intelligence Release)
+## 📅 Последна актуализация: Юли 2026 | Версия: 1.2.4 (Autonomous Work Orders & Dispatching Engine Release)
 
 ## 🔭 Визия
 IIIP е цялостна екосистема, проектирана да обедини авангардни технологии в единна, мащабируема и високопроизводителна платформа. Тя обхваща всичко от сензорни данни в реално време и дигитални двойници до етичен изкуствен интелект, квантови симулации, блокчейн интеграция и интелигентно управление на веригата за доставки.
