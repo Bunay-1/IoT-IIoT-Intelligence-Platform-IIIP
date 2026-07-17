@@ -22,6 +22,7 @@ from src.infrastructure.notification_intelligence import NotificationIntelligenc
 from src.ai_ml.predictive_quality_control import PredictiveQualityControl
 from src.infrastructure.real_time_optimization import RealTimeOptimization
 from src.industry_4_0.autonomous_work_orders_generator import AutonomousWorkOrdersGenerator
+from src.industry_4_0.chemical_process_safety import ChemicalProcessSafety
 from src.industry_4_0.cross_factory_intelligence_network import CrossFactoryIntelligenceNetwork
 from src.industry_4_0.fleet_management_manager import FleetManagementManager
 from src.industry_4_0.root_cause_analysis_engine import RootCauseAnalysisEngine
@@ -249,6 +250,71 @@ def test_modules():
     fleet_mgr.recommend_route(vehicle_id="AGV-10", destination=(42.6990, 23.3250))
     fleet_mgr.generate_status_figure()
     fleet_mgr.generate_battery_figure()
+
+    # Test ChemicalProcessSafety
+    chem_safety = ChemicalProcessSafety()
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    import datetime
+    loop.run_until_complete(
+        chem_safety.register_process_unit(
+            unit_id="Reactor-101",
+            name="Primary Hydrogen Reactor",
+            description="High pressure hydrogen cracker",
+            location="Sofia South Sector",
+            chemicals=["hydrogen", "methane"],
+            operating_conditions={"temperature": 150.0, "pressure": 8.0, "flow_rate": 100.0},
+            safety_systems=["Emergency Depressurizer", "Nitrogen Purger"]
+        )
+    )
+
+    loop.run_until_complete(
+        chem_safety.perform_hazop_study(
+            unit_id="Reactor-101",
+            analyst="Dr. Ivanov",
+            study_parameters={"parameters": ["temperature", "pressure"]}
+        )
+    )
+
+    loop.run_until_complete(
+        chem_safety.generate_safety_report(
+            report_type="summary",
+            start_date=datetime.datetime.now() - datetime.timedelta(days=30),
+            end_date=datetime.datetime.now() + datetime.timedelta(days=1)
+        )
+    )
+
+    loop.run_until_complete(
+        chem_safety.report_safety_incident(
+            unit_id="Reactor-101",
+            incident_type="pressure_excess",
+            severity="medium",
+            description="Pressure spiked to 9.5 bar briefly.",
+            reporter="Operator Petrov"
+        )
+    )
+
+    loop.run_until_complete(
+        chem_safety.perform_sil_assessment(
+            unit_id="Reactor-101",
+            safety_instrumented_functions=[
+                {
+                    "function_id": "SIF-01",
+                    "function_name": "Overpressure protection valve",
+                    "consequence_severity": 0.8,
+                    "failure_frequency": 0.2,
+                    "failure_probability": 0.05,
+                    "current_sil": "SIL2"
+                }
+            ]
+        )
+    )
+
+    chem_safety.get_safety_metrics()
 
     # Test CrossFactoryIntelligenceNetwork
     cross_net = CrossFactoryIntelligenceNetwork(network_id="TestNet")
