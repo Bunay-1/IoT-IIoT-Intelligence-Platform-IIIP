@@ -23,6 +23,7 @@ from src.ai_ml.predictive_quality_control import PredictiveQualityControl
 from src.infrastructure.real_time_optimization import RealTimeOptimization
 from src.industry_4_0.autonomous_work_orders_generator import AutonomousWorkOrdersGenerator
 from src.industry_4_0.cross_factory_intelligence_network import CrossFactoryIntelligenceNetwork
+from src.industry_4_0.fleet_management_manager import FleetManagementManager
 from src.industry_4_0.root_cause_analysis_engine import RootCauseAnalysisEngine
 from src.industry_4_0.safety_incident_predictor import SafetyIncidentPredictor
 from src.experimental.simulation_digital_twin import SimulationDigitalTwin
@@ -228,6 +229,26 @@ def test_modules():
     wo_generator.update_work_order_status(work_order_id="WO-00001", new_status="in_progress")
     wo_generator.generate_work_orders()
     wo_generator.analyze_work_order_data(data={})
+
+    # Test FleetManagementManager
+    fleet_mgr = FleetManagementManager()
+    fleet_mgr.register_vehicle(
+        vehicle_id="AGV-10",
+        vehicle_type="automated_stacker",
+        battery_level=0.90,
+        current_location=(42.6970, 23.3210)
+    )
+    fleet_mgr.update_telemetry(
+        vehicle_id="AGV-10",
+        location=(42.6972, 23.3215),
+        battery_level=0.88,
+        speed_mps=1.5,
+        cargo_loaded=True,
+        status="active"
+    )
+    fleet_mgr.recommend_route(vehicle_id="AGV-10", destination=(42.6990, 23.3250))
+    fleet_mgr.generate_status_figure()
+    fleet_mgr.generate_battery_figure()
 
     # Test CrossFactoryIntelligenceNetwork
     cross_net = CrossFactoryIntelligenceNetwork(network_id="TestNet")
