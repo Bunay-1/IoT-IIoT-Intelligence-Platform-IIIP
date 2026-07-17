@@ -3,7 +3,7 @@ version: '3.8'
 services:
   iiip-platform:
     build: .
-    image: iiip-platform:1.2.2
+    image: iiip-platform:1.2.3
     container_name: iiip_core
     ports:
       - "8000:8000"
