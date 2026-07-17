@@ -112,6 +112,8 @@ class Settings:
         self.monitoring = MonitoringConfig()
         self.iot = IoTConfig()
         self.ai = AIConfig()
+        self.models_dir = "models"
+        self.quality_threshold = 0.8
         
         # Load environment overrides
         self._load_from_env()
