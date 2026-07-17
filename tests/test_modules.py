@@ -21,6 +21,7 @@ from src.ai_ml.model_drift_monitoring import ModelDriftMonitoring
 from src.infrastructure.notification_intelligence import NotificationIntelligence
 from src.ai_ml.predictive_quality_control import PredictiveQualityControl
 from src.infrastructure.real_time_optimization import RealTimeOptimization
+from src.industry_4_0.autonomous_work_orders_generator import AutonomousWorkOrdersGenerator
 from src.industry_4_0.cross_factory_intelligence_network import CrossFactoryIntelligenceNetwork
 from src.industry_4_0.root_cause_analysis_engine import RootCauseAnalysisEngine
 from src.industry_4_0.safety_incident_predictor import SafetyIncidentPredictor
@@ -198,6 +199,35 @@ def test_modules():
     # Test SafetyIncidentPredictor
     incident_predictor = SafetyIncidentPredictor(model=MockModel2())
     incident_predictor.predict_incident(data={})
+
+    # Test AutonomousWorkOrdersGenerator
+    wo_generator = AutonomousWorkOrdersGenerator()
+    wo_generator.generate_work_order(
+        component_id="Robot-01",
+        trigger_type="anomaly_detected",
+        severity="high",
+        details="Spindle temperature exceeded limit."
+    )
+    wo_generator.generate_work_order(
+        component_id="Robot-02",
+        trigger_type="quality_defect",
+        severity="medium",
+        details="Micro-crack detected in weld.",
+        estimated_hours=1.0
+    )
+    wo_generator.generate_work_order(
+        component_id="Robot-03",
+        trigger_type="manual_request",
+        severity="critical",
+        details="Emergency stop button stuck.",
+        estimated_hours=4.0
+    )
+    wo_generator.optimize_schedule(criterion="EDD")
+    wo_generator.optimize_schedule(criterion="SPT")
+    wo_generator.optimize_schedule(criterion="PRIORITY")
+    wo_generator.update_work_order_status(work_order_id="WO-00001", new_status="in_progress")
+    wo_generator.generate_work_orders()
+    wo_generator.analyze_work_order_data(data={})
 
     # Test CrossFactoryIntelligenceNetwork
     cross_net = CrossFactoryIntelligenceNetwork(network_id="TestNet")
