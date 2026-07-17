@@ -157,17 +157,18 @@ class ContextualAnomalyClassifier:
         # Train autoencoder (reconstruct input)
         self.autoencoder.fit(X, X)
 
-        # Calculate reconstruction errors
+        # Calculate reconstruction errors per sample
         reconstructed = self.autoencoder.predict(X)
-        reconstruction_errors = mean_squared_error(
-            X, reconstructed, multioutput="raw_values"
-        )
+        reconstruction_errors = np.mean((X - reconstructed) ** 2, axis=1)
 
         # Normalize reconstruction errors to anomaly scores (0-1)
         # Higher error = more anomalous
-        normalized_errors = (reconstruction_errors - reconstruction_errors.min()) / (
-            reconstruction_errors.max() - reconstruction_errors.min()
-        )
+        err_min = reconstruction_errors.min()
+        err_max = reconstruction_errors.max()
+        if err_max > err_min:
+            normalized_errors = (reconstruction_errors - err_min) / (err_max - err_min)
+        else:
+            normalized_errors = np.zeros_like(reconstruction_errors)
 
         # Determine threshold based on contamination
         threshold = np.percentile(normalized_errors, (1 - self.contamination) * 100)
@@ -281,14 +282,15 @@ class ContextualAnomalyClassifier:
         # Autoencoder scoring
         if self.autoencoder:
             reconstructed = self.autoencoder.predict(X_scaled)
-            reconstruction_errors = mean_squared_error(
-                X_scaled, reconstructed, multioutput="raw_values"
-            )
+            reconstruction_errors = np.mean((X_scaled - reconstructed) ** 2, axis=1)
 
             # Normalize reconstruction errors
-            errors_norm = (reconstruction_errors - reconstruction_errors.min()) / (
-                reconstruction_errors.max() - reconstruction_errors.min()
-            )
+            err_min = reconstruction_errors.min()
+            err_max = reconstruction_errors.max()
+            if err_max > err_min:
+                errors_norm = (reconstruction_errors - err_min) / (err_max - err_min)
+            else:
+                errors_norm = np.zeros_like(reconstruction_errors)
 
             # Use training threshold
             threshold = self.training_stats.get("autoencoder", {}).get(
