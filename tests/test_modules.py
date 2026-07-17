@@ -21,6 +21,7 @@ from src.ai_ml.model_drift_monitoring import ModelDriftMonitoring
 from src.infrastructure.notification_intelligence import NotificationIntelligence
 from src.ai_ml.predictive_quality_control import PredictiveQualityControl
 from src.infrastructure.real_time_optimization import RealTimeOptimization
+from src.industry_4_0.cross_factory_intelligence_network import CrossFactoryIntelligenceNetwork
 from src.industry_4_0.root_cause_analysis_engine import RootCauseAnalysisEngine
 from src.industry_4_0.safety_incident_predictor import SafetyIncidentPredictor
 from src.experimental.simulation_digital_twin import SimulationDigitalTwin
@@ -197,6 +198,30 @@ def test_modules():
     # Test SafetyIncidentPredictor
     incident_predictor = SafetyIncidentPredictor(model=MockModel2())
     incident_predictor.predict_incident(data={})
+
+    # Test CrossFactoryIntelligenceNetwork
+    cross_net = CrossFactoryIntelligenceNetwork(network_id="TestNet")
+    cross_net.register_factory(
+        factory_id="Factory-Sofia",
+        location="Sofia, BG",
+        production_lines=["Line-A", "Line-B"]
+    )
+    cross_net.register_factory(
+        factory_id="Factory-Plovdiv",
+        location="Plovdiv, BG",
+        production_lines=["Line-C"],
+        base_kpis={"oee": 0.88, "availability": 0.96, "performance": 0.91, "quality_rate": 0.99, "energy_efficiency_score": 90.0}
+    )
+    cross_net.share_insights(factory_id="Factory-Sofia", insight_type="tool_wear", data={"status": "warning"})
+    cross_net.perform_network_kpi_benchmarking()
+    cross_net.propagate_anomaly_advisory(
+        origin_factory_id="Factory-Sofia",
+        severity="high",
+        critical_component="Spindle",
+        root_cause_analysis="Vibration excess"
+    )
+    cross_net.get_factory_status(factory_id="Factory-Plovdiv")
+    cross_net.analyze_factory_data(factory_id="Factory-Sofia")
 
 
 if __name__ == "__main__":
